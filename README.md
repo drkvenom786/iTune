@@ -38,7 +38,8 @@
 | [Code of Conduct](CODE_OF_CONDUCT.md) | Community participation standards |
 | [Security](SECURITY.md) | Private vulnerability reporting and secret handling |
 | [Copyright](COPYRIGHT.md) | Copyright ownership and third-party notices |
-| [MIT License](LICENSE) | Reuse and redistribution terms for original project code |
+| [Licensing guide](LICENSING.md) | Detailed explanation of GPL permissions, distribution duties, contributions, and third-party materials |
+| [GNU GPL v3 License](LICENSE) | GNU General Public License version 3 or later |
 
 ## What iTune does
 
@@ -285,4 +286,13 @@ For large changes, describe the user-visible behavior, settings involved, permis
 
 ## License
 
-Original iTune source code and documentation are available under the [MIT License](LICENSE). See [COPYRIGHT.md](COPYRIGHT.md) for the scope of that license and notes about third-party code, assets, and services. The MIT license does not grant rights to third-party media or services.
+Copyright © 2026 iTune Project.
+
+This project is licensed under the
+[GNU General Public License v3.0 or later](LICENSE).
+
+You may use, study, modify, and redistribute this software, including for commercial purposes, under the GNU GPL v3.0 or (at your option) any later version. If you distribute a modified or combined covered work, you must comply with the GPL's source-code, notice, and same-license requirements.
+
+See [LICENSE](LICENSE) for the complete license and [COPYRIGHT.md](COPYRIGHT.md)
+for copyright ownership and third-party notices. Third-party libraries, assets,
+media, and services remain subject to their own licenses and terms.

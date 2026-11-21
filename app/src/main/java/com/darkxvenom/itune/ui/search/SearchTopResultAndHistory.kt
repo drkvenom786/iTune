@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.search
 
 import androidx.compose.animation.animateColorAsState
@@ -93,7 +104,7 @@ internal enum class TopResultBusyAction {
     ARTIST_MIX
 }
 
-internal sealed interface TopResultItem {
+sealed interface TopResultItem {
     val stableKey: String
     val title: String
     val thumbnailUrl: String?
@@ -132,7 +143,7 @@ internal data class SearchSuggestionRowModel(
  * Matches the user's written query across ALL four result categories (Artists, Songs, Albums, Playlists).
  * Exact spelling matches take absolute priority and return strictly ONE hero Top Result card.
  */
-internal fun pickTopResult(query: String, results: UnifiedSearchResults): TopResultItem? {
+fun pickTopResult(query: String, results: UnifiedSearchResults): TopResultItem? {
     val qNorm = normalizeSearchText(query)
     if (qNorm.isEmpty() || results.isEmpty) return null
     val qStripped = stripPunctuation(qNorm)
@@ -497,6 +508,7 @@ internal fun TopResultHeroCard(
         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 private fun TopResultSubtitleRow(

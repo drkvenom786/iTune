@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.backend
 
 import android.content.Context
@@ -25,6 +36,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -80,6 +92,8 @@ object MusicPlayerState : Player.Listener {
     private var lastPlaybackFailureTrackId: String? = null
     private var lastPlaybackFailureAtMs: Long = 0L
     private val autoSkipFailedTrackIds = mutableSetOf<String>()
+    private var streamRetryAttemptCount = 0
+    private var lastFailedStreamUrl: String? = null
 
     // ── Observable UI States ──
     var currentTrack by mutableStateOf<MusicTrack?>(null)
@@ -94,6 +108,9 @@ object MusicPlayerState : Player.Listener {
         private set
 
     var isLoading by mutableStateOf(false)
+        private set
+
+    var playbackState by mutableIntStateOf(Player.STATE_IDLE)
         private set
 
     var positionMs by mutableLongStateOf(0L)
@@ -453,6 +470,12 @@ object MusicPlayerState : Player.Listener {
         )
     }
 
+    fun ensureProgressLoopRunning() {
+        if (progressJob == null || progressJob?.isActive != true) {
+            startProgressLoop()
+        }
+    }
+
     private fun startProgressLoop() {
         progressJob?.cancel()
         progressJob = scope.launch {
@@ -465,6 +488,7 @@ object MusicPlayerState : Player.Listener {
                             durationMs = dur
                         }
                         isPlaying = player.isPlaying
+                        playbackState = player.playbackState
                         isLoading = !player.isPlaying && player.playbackState == Player.STATE_BUFFERING
                         val active = currentTrack
                         if (player.isPlaying && active != null) {
@@ -505,6 +529,7 @@ object MusicPlayerState : Player.Listener {
         preResolvedUrl: String? = null,
     ) {
         autoSkipFailedTrackIds.remove(track.id)
+        ensureProgressLoopRunning()
         if (AutoSleepTimerManager.isSleepWindowActive()) {
             appContext?.let {
                 android.widget.Toast.makeText(it, "Auto Sleep Timer active · Playback paused", android.widget.Toast.LENGTH_SHORT).show()
@@ -527,6 +552,10 @@ object MusicPlayerState : Player.Listener {
             YouTubePlaybackTracker.onTrackChanged(positionMs / 1000L)
             com.darkxvenom.itune.data.timetravel.TimeTravelPlaybackTracker.onTrackChanged()
         }
+        if (currentTrack?.id != track.id) {
+            streamRetryAttemptCount = 0
+            lastFailedStreamUrl = null
+        }
         if (expandPlayer) expanded = true
         loadJob?.cancel()
 
@@ -547,6 +576,9 @@ object MusicPlayerState : Player.Listener {
             else -> 0L
         }
         currentTrack = track
+        // Make sure the media notification exists as soon as a song is requested (not only once
+        // the stream has resolved), so it shows up for every song.
+        if (autoPlay) appContext?.let { PlaybackService.start(it) }
         com.darkxvenom.itune.audio.LowPassFilterController.onPlaybackStarted(track.id)
         appContext?.let { LibraryStore.recordRecentSong(it, track) }
         if (autoPlay) {
@@ -593,12 +625,36 @@ object MusicPlayerState : Player.Listener {
                 }
 
                 val cachedFile = MusicCacheManager.getCachedAudioFile(track.id)
+                // Pill state for cached songs, plus the optional background "upgrade cached songs" pass.
+                if (cachedFile != null) {
+                    val cachedFrom = if (MusicCacheManager.cachedSource(track.id) == "saavn") "JioSaavn" else "YouTube"
+                    com.darkxvenom.itune.audio.StreamTraceStore.put(
+                        track.id,
+                        com.darkxvenom.itune.audio.StreamTrace(
+                            source = "Local cache ($cachedFrom)",
+                            quality = "",
+                            steps = listOf(
+                                "Found a saved copy on this device (${MusicCacheManager.formatStorageSize(cachedFile.length())})",
+                                "That copy was originally downloaded from $cachedFrom",
+                                "No network request needed — played straight from storage",
+                            ),
+                        ),
+                    )
+                    when (MusicCacheManager.cachedSource(track.id)) {
+                        "saavn" -> com.darkxvenom.itune.data.saavn.SaavnQuality.set(track.id, com.darkxvenom.itune.data.saavn.SaavnStatus.LOSSLESS)
+                        else -> {
+                            com.darkxvenom.itune.data.saavn.SaavnQuality.clear(track.id)
+                            val st = SettingsStore.state.value
+                            if (st.jioSaavnProvider && st.upgradeCachedSongs && !st.offlineMode) upgradeCachedInBackground(track)
+                        }
+                    }
+                }
                 val streamUrl = preResolvedUrl ?: if (cachedFile != null) {
                     Uri.fromFile(cachedFile).toString()
                 } else if (SettingsStore.state.value.offlineMode) {
                     null
                 } else {
-                    MusicBackend.resolveAudioStreamUrl(track.id)
+                    MusicBackend.resolveAudioStreamUrl(track.id, title = track.title, artist = track.artists)
                 }
                 if (streamUrl.isNullOrBlank()) {
                     Log.e(TAG, "Failed to resolve stream URL for track: ${track.id}")
@@ -614,7 +670,11 @@ object MusicPlayerState : Player.Listener {
 
                 if (MusicCacheManager.cachingEnabled.value && cachedFile == null) {
                     scope.launch(Dispatchers.IO) {
-                        MusicCacheManager.cacheTrackOnDemand(track)
+                        if (com.darkxvenom.itune.data.saavn.JioSaavnProvider.isSaavnUrl(streamUrl)) {
+                            MusicCacheManager.cacheSaavnStream(track, streamUrl, replaceExisting = false)
+                        } else {
+                            MusicCacheManager.cacheTrackOnDemand(track)
+                        }
                     }
                 }
 
@@ -651,6 +711,7 @@ object MusicPlayerState : Player.Listener {
             }
         }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     private fun fetchLyricsForCurrentTrack(track: MusicTrack) {
         lyricsJob?.cancel()
@@ -750,9 +811,130 @@ object MusicPlayerState : Player.Listener {
 
     fun pause() {
         exoPlayer?.pause()
+        isPlaying = false
+    }
+
+    fun stop() {
+        progressJob?.cancel()
+        loadJob?.cancel()
+        runCatching {
+            exoPlayer?.stop()
+            exoPlayer?.clearMediaItems()
+        }
+        isPlaying = false
+        isLoading = false
+        playbackState = Player.STATE_IDLE
+    }
+
+    fun resetForAccountSwitch() {
+        stop()
+        currentTrack = null
+        queue.clear()
+        queueIndex = 0
+        positionMs = 0L
+        durationMs = 0L
+        lyrics = emptyList()
+        rawLyricsText = ""
+        lyricsOffsetMs = 0L
+        hasCustomLyricsOverride = false
+        lyricsLoading = false
+        ensureProgressLoopRunning()
+    }
+
+    /** Live format the decoder is reading right now (mime, bitrate, sample rate, channels), or null. */
+    fun liveAudioFormat(): androidx.media3.common.Format? = exoPlayer?.audioFormat
+
+    // ── Upgrade Quality (JioSaavn) ──────────────────────────────────────────
+
+    /** True while the 3-dot menu's "Upgrade Quality" is searching / swapping. */
+    var upgradingQuality by mutableStateOf(false)
+        private set
+
+    private val backgroundUpgrades = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Settings: "Upgrade Quality of cached songs" — replaces a cached YouTube copy with the JioSaavn one. */
+    private fun upgradeCachedInBackground(track: MusicTrack) {
+        if (!backgroundUpgrades.add(track.id)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val url = com.darkxvenom.itune.data.saavn.JioSaavnProvider.lookup(track.title, track.artists) ?: return@launch
+                MusicCacheManager.cacheSaavnStream(track, url, replaceExisting = true) { ok ->
+                    if (ok && currentTrack?.id == track.id) {
+                        com.darkxvenom.itune.data.saavn.SaavnQuality.set(track.id, com.darkxvenom.itune.data.saavn.SaavnStatus.LOSSLESS)
+                    }
+                }
+            } finally {
+                // Allow a later retry only if the cache still holds the YouTube copy.
+                if (MusicCacheManager.cachedSource(track.id) == "saavn") Unit else backgroundUpgrades.remove(track.id)
+            }
+        }
+    }
+
+    /**
+     * 3-dot menu → "Upgrade Quality". Finds the song on JioSaavn and, when found, switches the playing
+     * stream to it at the CURRENT position (no restart), then replaces the cached copy with the JioSaavn one.
+     */
+    fun upgradeCurrentQuality() {
+        val ctx = appContext ?: return
+        val track = currentTrack ?: return
+        if (upgradingQuality) return
+        val saavn = com.darkxvenom.itune.data.saavn.SaavnQuality.statuses.value[track.id]
+        val alreadyLossless = saavn == com.darkxvenom.itune.data.saavn.SaavnStatus.LOSSLESS ||
+            MusicCacheManager.cachedSource(track.id) == "saavn"
+        if (alreadyLossless) {
+            Toast.makeText(ctx, "Song already playing in Lossless Quality", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!SettingsStore.state.value.jioSaavnProvider) {
+            Toast.makeText(ctx, "Turn on JioSaavn Provider in Settings to upgrade quality", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (SettingsStore.state.value.offlineMode) {
+            Toast.makeText(ctx, "Offline mode: can't upgrade quality", Toast.LENGTH_SHORT).show()
+            return
+        }
+        upgradingQuality = true
+        scope.launch {
+            try {
+                com.darkxvenom.itune.data.saavn.SaavnQuality.set(track.id, com.darkxvenom.itune.data.saavn.SaavnStatus.SEARCHING)
+                val url = com.darkxvenom.itune.data.saavn.JioSaavnProvider.resolve(track.id, track.title, track.artists, emptySet(), force = true)
+                if (url == null) {
+                    Toast.makeText(ctx, "No lossless version found for this song", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                if (currentTrack?.id != track.id) return@launch // user moved on meanwhile
+                withContext(Dispatchers.Main) {
+                    exoPlayer?.let { player ->
+                        val resumeAt = player.currentPosition.coerceAtLeast(0L)
+                        val wasPlaying = player.playWhenReady
+                        val item = MediaItem.Builder()
+                            .setMediaId(track.id)
+                            .setUri(Uri.parse(url))
+                            .setMediaMetadata(
+                                MediaMetadata.Builder()
+                                    .setTitle(track.title)
+                                    .setArtist(track.artists)
+                                    .setAlbumTitle(track.album)
+                                    .setArtworkUri((track.thumbnailUrl?.highQualityThumbnail() ?: track.thumbnailUrl)?.let(Uri::parse))
+                                    .build()
+                            )
+                            .build()
+                        player.setMediaItem(item, resumeAt)
+                        player.prepare()
+                        player.setPlaybackSpeed(if (holdingFast) 2f else playbackSpeed)
+                        player.playWhenReady = wasPlaying
+                    }
+                }
+                // Replace (or create) the cached copy with the JioSaavn one.
+                MusicCacheManager.cacheSaavnStream(track, url, replaceExisting = true)
+            } finally {
+                upgradingQuality = false
+            }
+        }
     }
 
     fun togglePlayPause() {
+        ensureProgressLoopRunning()
         val track = currentTrack ?: return
         if (restoredPendingStream) {
             if (!resolvingStream) {
@@ -1262,6 +1444,7 @@ object MusicPlayerState : Player.Listener {
     }
 
     override fun onPlaybackStateChanged(playbackState: Int) {
+        this.playbackState = playbackState
         when (playbackState) {
             Player.STATE_BUFFERING -> {
                 isLoading = true
@@ -1270,6 +1453,8 @@ object MusicPlayerState : Player.Listener {
                 isLoading = false
                 durationMs = exoPlayer?.duration?.coerceAtLeast(0L) ?: 0L
                 autoSkipFailedTrackIds.clear()
+                streamRetryAttemptCount = 0
+                lastFailedStreamUrl = null
             }
             Player.STATE_ENDED -> {
                 com.darkxvenom.itune.data.timetravel.TimeTravelPlaybackTracker.onTrackCompleted()
@@ -1307,10 +1492,87 @@ object MusicPlayerState : Player.Listener {
 
     override fun onPlayerError(error: PlaybackException) {
         Log.e(TAG, "ExoPlayer error: ${error.errorCodeName} - ${error.message}", error)
+        val track = currentTrack
+        val trackId = track?.id
+        val currentPos = exoPlayer?.currentPosition?.coerceAtLeast(0L) ?: positionMs
+        val wasActivelyPlaying = currentPos > 3000L
+
+        val httpEx = findCause<HttpDataSource.InvalidResponseCodeException>(error)
+        val isHttp403 = httpEx?.responseCode == 403 ||
+            error.message?.contains("403") == true ||
+            error.cause?.message?.contains("403") == true ||
+            (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && httpEx?.responseCode != null && httpEx.responseCode >= 400)
+
+        if (track != null && trackId != null && (isHttp403 || wasActivelyPlaying) && streamRetryAttemptCount < 2) {
+            streamRetryAttemptCount++
+            Log.w(TAG, "Attempting stream recovery for $trackId (attempt $streamRetryAttemptCount, 403=$isHttp403, pos=${currentPos}ms)...")
+
+            // Invalidate cached stream in MusicBackend so we don't replay the same 403 URL
+            MusicBackend.invalidateStreamCache(trackId)
+
+            val currentMediaUri = exoPlayer?.currentMediaItem?.localConfiguration?.uri?.toString()
+            val excluded = buildSet {
+                currentMediaUri?.let { add(it) }
+                lastFailedStreamUrl?.let { add(it) }
+            }
+            if (currentMediaUri != null) lastFailedStreamUrl = currentMediaUri
+
+            scope.launch {
+                delay(300L)
+                val freshUrl = MusicBackend.resolveAudioStreamUrl(
+                    videoId = trackId,
+                    forceRefresh = true,
+                    excludedUrls = excluded
+                )
+                if (!freshUrl.isNullOrBlank() && currentTrack?.id == trackId) {
+                    Log.i(TAG, "Successfully recovered fresh stream for $trackId! Resuming playback...")
+                    withContext(Dispatchers.Main) {
+                        exoPlayer?.let { player ->
+                            val mediaItem = MediaItem.Builder()
+                                .setMediaId(trackId)
+                                .setUri(Uri.parse(freshUrl))
+                                .setMediaMetadata(
+                                    MediaMetadata.Builder()
+                                        .setTitle(track.title)
+                                        .setArtist(track.artists)
+                                        .setAlbumTitle(track.album)
+                                        .setArtworkUri((track.thumbnailUrl?.highQualityThumbnail() ?: track.thumbnailUrl)?.let(Uri::parse))
+                                        .build()
+                                )
+                                .build()
+                            player.setMediaItem(mediaItem, currentPos)
+                            player.prepare()
+                            player.playWhenReady = true
+                            player.play()
+                        }
+                    }
+                    return@launch
+                }
+
+                // If recovery failed, proceed to standard failure display and auto-skip
+                withContext(Dispatchers.Main) {
+                    showPlaybackFailure(trackId, error)
+                    resolvingStream = false
+                    isLoading = false
+                    autoSkipAfterFailure(trackId)
+                }
+            }
+            return
+        }
+
         showPlaybackFailure(currentTrack?.id, error)
         resolvingStream = false
         isLoading = false
         currentTrack?.id?.let(::autoSkipAfterFailure)
+    }
+
+    private inline fun <reified T : Throwable> findCause(throwable: Throwable?): T? {
+        var current = throwable
+        while (current != null) {
+            if (current is T) return current
+            current = current.cause
+        }
+        return null
     }
 
     private fun autoSkipAfterFailure(failedTrackId: String) {
@@ -1389,5 +1651,8 @@ object MusicPlayerState : Player.Listener {
         simultaneousProcessor = null
         exoPlayer?.release()
         exoPlayer = null
+        isPlaying = false
+        isLoading = false
+        playbackState = Player.STATE_IDLE
     }
 }

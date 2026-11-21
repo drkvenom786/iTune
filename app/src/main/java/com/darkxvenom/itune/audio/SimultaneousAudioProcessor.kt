@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.audio
 
 import android.content.Context
@@ -95,6 +106,10 @@ class SimultaneousAudioProcessor(
     }
 
     fun setEnabled(isEnabled: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            enabled = false
+            return
+        }
         if (enabled == isEnabled) return
         enabled = isEnabled
         synchronized(trackLock) {
@@ -105,6 +120,7 @@ class SimultaneousAudioProcessor(
             }
         }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     fun setTargetDevice(device: AudioDeviceInfo?) {
         targetDevice = device
@@ -141,6 +157,7 @@ class SimultaneousAudioProcessor(
 
     private fun recreateSecondaryTrackLocked() {
         releaseTrackLocked()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         if (!enabled || sampleRate <= 0) return
 
         runCatching {
@@ -202,6 +219,7 @@ class SimultaneousAudioProcessor(
     }
 
     private fun getSpeakerDevice(): AudioDeviceInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
         val mgr = audioManager ?: return null
         return mgr.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }

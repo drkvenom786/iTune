@@ -1,9 +1,22 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.components
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -33,12 +46,14 @@ import com.darkxvenom.itune.data.repository.AvatarManager
  * Automatically synchronizes with AvatarManager's persistent selection and falls back to
  * the signature Apple Memoji canvas if network is unavailable.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppleMemojiAvatar(
     modifier: Modifier = Modifier,
     size: Dp = 36.dp,
     avatarId: Int? = null,
-    onClick: () -> Unit = {}
+    onLongClick: (() -> Unit)? = null,
+    onClick: (() -> Unit)? = null
 ) {
     val currentId = avatarId ?: AvatarManager.currentAvatarId.value
     val avatarUrl = remember(currentId) { AvatarManager.getAvatarUrl(currentId) }
@@ -56,7 +71,23 @@ fun AppleMemojiAvatar(
                 ),
                 shape = CircleShape
             )
-            .clickable { onClick() },
+            .then(
+                if (onLongClick != null && onClick != null) {
+                    Modifier.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = onLongClick,
+                    )
+                } else if (onLongClick != null) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClick = onLongClick,
+                    )
+                } else if (onClick != null) {
+                    Modifier.clickable { onClick() }
+                } else {
+                    Modifier
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
         SubcomposeAsyncImage(
@@ -76,6 +107,7 @@ fun AppleMemojiAvatar(
         )
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 private fun AppleMemojiFallback(size: Dp) {

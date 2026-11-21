@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.player
 
 import android.content.BroadcastReceiver
@@ -10,6 +21,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -84,7 +96,6 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlaylistPlay
 import androidx.compose.material3.CircularProgressIndicator
@@ -110,6 +121,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size as ComposeSize
@@ -121,9 +133,11 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -136,6 +150,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -143,6 +158,7 @@ import androidx.annotation.DrawableRes
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
 import coil.size.Size
 import com.darkxvenom.itune.R
@@ -150,6 +166,9 @@ import com.darkxvenom.itune.audio.AudioEngineManager
 import com.darkxvenom.itune.audio.AudioOutputManager
 import com.darkxvenom.itune.backend.MusicPlayerState
 import com.darkxvenom.itune.backend.lyrics.LyricsTranslationHelper
+import com.darkxvenom.itune.data.artist.CanvasArtwork
+import com.darkxvenom.itune.data.artist.CanvasSource
+import com.darkxvenom.itune.data.canvas.CanvasRepository
 import com.darkxvenom.itune.data.model.BrowseType
 import com.darkxvenom.itune.data.model.PendingArtistNav
 import com.darkxvenom.itune.backend.MusicTrack
@@ -157,7 +176,11 @@ import com.darkxvenom.itune.backend.WordTiming
 import com.darkxvenom.itune.backend.highQualityThumbnail
 import com.darkxvenom.itune.data.library.SettingsStore
 import com.darkxvenom.itune.ishare.IShareSyncManager
+import com.darkxvenom.itune.ui.artist.canvas.CanvasArtworkPlayer
+import com.darkxvenom.itune.ui.artist.canvas.CanvasContentMode
 import com.darkxvenom.itune.ui.artist.components.ExplicitBadge
+import com.darkxvenom.itune.ui.theme.AppleMusicRed
+import androidx.compose.runtime.rememberUpdatedState
 import com.darkxvenom.itune.ui.artist.icons.SfIcons
 import com.darkxvenom.itune.ui.artist.theme.rememberArtworkPalette
 import com.darkxvenom.itune.ui.components.AnimatedEqualizer
@@ -323,7 +346,7 @@ private fun buildPlayerLyricPreviewLine(
     lines: List<com.darkxvenom.itune.backend.LyricsLine>,
 ): PlayerLyricPreviewLine? {
     val line = lines.getOrNull(index) ?: return null
-    if (line.text.isBlank()) return null
+    if (line.text.isBlank() || line.text.startsWith("{\"") || line.text.startsWith("krc1")) return null
     if (line.words.isNotEmpty()) return PlayerLyricPreviewLine(line.timeMs, line.text, line.words)
 
     val nextLineTime = lines.getOrNull(index + 1)?.timeMs
@@ -355,6 +378,90 @@ private fun findPlayerLyricPreviewIndex(
     // instead of showing the loading/empty fallback until playback reaches that timestamp.
     return lines.indexOfLast { it.timeMs <= positionMs }.coerceAtLeast(0)
 }
+
+private const val CANVAS_ALBUM_SETTLE_MS = 450L
+private const val CANVAS_CONTROLS_IDLE_MS = 5_000L
+private const val CANVAS_CONTROLS_ANIMATION_MS = 420
+private const val CANVAS_RESUME_DELAY_MS = 1_000L
+private const val CANVAS_TAP_SLOP_FACTOR = 2.5f
+
+@Composable
+private fun rememberTrackCanvasArtwork(
+    track: MusicTrack,
+    animatedArtworkEnabled: Boolean,
+    canvasOverCellular: Boolean,
+    prioritizeSpotifyCanvas: Boolean,
+    spotifyToken: String,
+): CanvasArtwork? {
+    val context = LocalContext.current
+    var canvas by remember(track.title, track.artists) { mutableStateOf<CanvasArtwork?>(null) }
+
+    LaunchedEffect(
+        track.id,
+        track.album,
+        animatedArtworkEnabled,
+        canvasOverCellular,
+        prioritizeSpotifyCanvas,
+        spotifyToken,
+    ) {
+        if (!animatedArtworkEnabled) {
+            canvas = null
+            return@LaunchedEffect
+        }
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val isMetered = cm?.isActiveNetworkMetered == true
+        if (isMetered && !canvasOverCellular) {
+            canvas = null
+            return@LaunchedEffect
+        }
+        canvas = CanvasRepository.cached(track)
+            ?: canvas?.takeIf { it.matches(track.title, track.artists, track.album) }
+
+        if (canvas == null && track.album.isNullOrBlank()) {
+            delay(CANVAS_ALBUM_SETTLE_MS)
+        }
+        canvas = CanvasRepository.canvasFor(track) ?: canvas
+    }
+
+    return remember(canvas) {
+        canvas?.let { art ->
+            val tall = art.portraitUrl
+            if (tall != null) {
+                art.copy(url = tall, fallbackUrl = art.url, portraitUrl = null)
+            } else art
+        }
+    }
+}
+
+@Composable
+private fun Modifier.toggleCanvasControlsOnTap(
+    enabled: Boolean,
+    onToggle: () -> Unit,
+): Modifier {
+    val currentOnToggle = rememberUpdatedState(onToggle)
+    return pointerInput(enabled) {
+        if (!enabled) return@pointerInput
+        val tapSlop = viewConfiguration.touchSlop * CANVAS_TAP_SLOP_FACTOR
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            var dragged = false
+            var claimed = down.isConsumed
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                claimed = claimed || change.isConsumed
+                if ((change.position - down.position).getDistance() > tapSlop || event.changes.size > 1) {
+                    dragged = true
+                }
+                if (!change.pressed) {
+                    if (!dragged && !claimed) currentOnToggle.value()
+                    break
+                }
+            } while (true)
+        }
+    }
+}
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 fun ITuneMusicPlayer(
@@ -510,11 +617,139 @@ fun ITuneMusicPlayer(
     // Artwork colors are optional; when disabled, restore the original white Apple-style player controls.
     val playerAccentColor = if (settingsState.playerDynamicColoring) artworkAccentColor else Color.White
 
+    var thumbnailLoadedTrackId by remember { mutableStateOf<String?>(null) }
+    val isCoverLoaded = !currentArtUrl.isNullOrBlank()
+
+    val isFullScreenCover = settingsState.fullScreenCoverArt
+    val coverZoomAnim = remember { Animatable(0f) }
+    val coverZoomProgress = coverZoomAnim.value
+
+    LaunchedEffect(track.id, isFullScreenCover) {
+        if (isFullScreenCover) {
+            coverZoomAnim.snapTo(0f)
+            delay(160L)
+            coverZoomAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = 0.84f,
+                    stiffness = 140f,
+                ),
+            )
+        } else {
+            coverZoomAnim.animateTo(0f, tween(250))
+        }
+    }
+
+    // When in square mode, pausing shrinks the artwork to 0.86f, resuming smoothly expands it back to 1.0f
+    val squarePlayPauseScale by animateFloatAsState(
+        targetValue = if (coverZoomProgress < 0.2f && !isPlaying && panelProgress < 0.1f) 0.86f else 1.0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessLow,
+        ),
+        label = "squarePlayPauseScale",
+    )
+
+    // ── Canvas (Spotify, Apple Music, Tidal & Community) State ──
+    val canvas = rememberTrackCanvasArtwork(
+        track = track,
+        animatedArtworkEnabled = settingsState.animatedArtwork,
+        canvasOverCellular = settingsState.canvasOverCellular,
+        prioritizeSpotifyCanvas = settingsState.prioritizeSpotifyCanvas,
+        spotifyToken = settingsState.spotifySpdcToken,
+    )
+    var canvasAspect by remember(canvas?.url) { mutableFloatStateOf(0f) }
+    var canvasRendered by remember(canvas?.url) { mutableStateOf(false) }
+    val canvasCover = remember(canvas?.url) { mutableFloatStateOf(0f) }
+    var playerBoundsPx by remember { mutableStateOf(IntSize.Zero) }
+    var lowerDeckHeightPx by remember { mutableFloatStateOf(0f) }
+
+    val isSpotifyCanvas = canvas?.source == CanvasSource.SPOTIFY
+    val isPortraitCanvas = !isSpotifyCanvas && canvas != null && canvasAspect > 0f && canvasAspect < 0.92f
+    val canvasPresentation = canvas != null && canvasRendered && !isPanelOpen && sp > 0.85f
+    var canvasControlsOpen by remember(canvas?.url) { mutableStateOf(true) }
+
+    // Auto-minimize controls after 5s of uninterrupted playback when Canvas is active
+    LaunchedEffect(
+        canvasPresentation,
+        canvasControlsOpen,
+        settingsState.spotifyCanvasAutoHide,
+        isPlaying,
+        isSeeking,
+        isPanelOpen,
+        isMoreMenuOpen,
+        isISharePopupOpen,
+        isAudioOutputPopupOpen,
+        isAudioEnginePopupOpen,
+    ) {
+        if (!canvasPresentation || !canvasControlsOpen ||
+            !settingsState.spotifyCanvasAutoHide || !isPlaying || isSeeking ||
+            isPanelOpen || isMoreMenuOpen || isISharePopupOpen ||
+            isAudioOutputPopupOpen || isAudioEnginePopupOpen
+        ) return@LaunchedEffect
+        delay(CANVAS_CONTROLS_IDLE_MS)
+        canvasControlsOpen = false
+    }
+
+    LaunchedEffect(canvasPresentation, isPanelOpen) {
+        if (canvasPresentation && !isPanelOpen) {
+            canvasControlsOpen = true
+        }
+    }
+
+    LaunchedEffect(track.id, canvasPresentation, settingsState.showSyncedLyricsOverCanvas) {
+        if (canvasPresentation && settingsState.showSyncedLyricsOverCanvas &&
+            MusicPlayerState.lyrics.isEmpty() && !MusicPlayerState.lyricsLoading
+        ) {
+            MusicPlayerState.refreshLyrics()
+        }
+    }
+
+    val canvasAnyPopupOpen = isMoreMenuOpen || isISharePopupOpen || isAudioOutputPopupOpen || isAudioEnginePopupOpen
+    val showCanvasKineticLyrics = settingsState.showSyncedLyricsOverCanvas &&
+        canvasPresentation &&
+        !canvasControlsOpen &&
+        !isPanelOpen &&
+        !canvasAnyPopupOpen &&
+        !isSeeking
+
+    val canvasMinimizeProgress by animateFloatAsState(
+        targetValue = if (canvasPresentation && !canvasControlsOpen) 1f else 0f,
+        animationSpec = tween(durationMillis = CANVAS_CONTROLS_ANIMATION_MS, easing = FastOutSlowInEasing),
+        label = "canvasMinimizeProgress",
+    )
+    val canvasKineticLyricsAlpha by animateFloatAsState(
+        targetValue = if (showCanvasKineticLyrics) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (showCanvasKineticLyrics) 220 else 100,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "canvasKineticLyricsAlpha",
+    )
+    val canvasDimAlpha by animateFloatAsState(
+        targetValue = if (canvasPresentation && isSpotifyCanvas && canvasControlsOpen) 0.45f else 0f,
+        animationSpec = tween(durationMillis = CANVAS_CONTROLS_ANIMATION_MS, easing = FastOutSlowInEasing),
+        label = "canvasDimAlpha",
+    )
+    val canvasChromeAlpha = (1f - canvasMinimizeProgress * 1.4f).coerceIn(0f, 1f)
+    val canvasSlideDownPx = if (lowerDeckHeightPx > 0f) {
+        lowerDeckHeightPx * canvasMinimizeProgress
+    } else {
+        with(density) { 142.dp.toPx() } * canvasMinimizeProgress
+    }
+    val compactTitleNudgePx = with(density) { 24.dp.toPx() } * canvasMinimizeProgress
+
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onSizeChanged { playerBoundsPx = it }
             .onGloballyPositioned { rootBoxCoords = it }
+            .toggleCanvasControlsOnTap(
+                enabled = canvasPresentation && !isMoreMenuOpen && !isISharePopupOpen &&
+                    !isAudioOutputPopupOpen && !isAudioEnginePopupOpen,
+                onToggle = { canvasControlsOpen = !canvasControlsOpen },
+            )
     ) {
         val statusBarTopDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val navBottomDp = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -601,6 +836,110 @@ fun ITuneMusicPlayer(
                 )
         )
 
+        // ── 2b. Animated Canvas Video Layer (Spotify, Apple Music, Tidal & Community) ──
+        val canvasMounted = canvas != null && (!isPanelOpen || panelProgress < 0.95f) && sp > 0.1f
+        if (canvasMounted && canvas != null) {
+            val clipBottomPx = remember(isPortraitCanvas, playerBoundsPx, canvasAspect) {
+                if (isPortraitCanvas && playerBoundsPx.width > 0 && playerBoundsPx.height > 0 && canvasAspect > 0f) {
+                    val viewAspect = playerBoundsPx.width.toFloat() / playerBoundsPx.height.toFloat()
+                    if (canvasAspect >= viewAspect) playerBoundsPx.width / canvasAspect
+                    else playerBoundsPx.height.toFloat()
+                } else null
+            }
+            val anyPopupOpen = isMoreMenuOpen || isISharePopupOpen || isAudioOutputPopupOpen || isAudioEnginePopupOpen
+            CanvasArtworkPlayer(
+                canvas = canvas,
+                isPlaying = isPlaying,
+                contentMode = when {
+                    isSpotifyCanvas -> CanvasContentMode.CROP
+                    isPortraitCanvas -> CanvasContentMode.FIT_PORTRAIT
+                    else -> CanvasContentMode.CROP
+                },
+                alignPortraitTop = isPortraitCanvas,
+                onAspectRatioChanged = { canvasAspect = it },
+                portraitRevealBounds = playerBoundsPx,
+                presentationAlpha = {
+                    ((1f - panelProgress * 2f).coerceIn(0f, 1f)) *
+                        ((sp - 0.15f) / 0.85f).coerceIn(0f, 1f)
+                },
+                pausedForTransition = isPanelOpen || sp < 0.95f || (anyPopupOpen && !isSpotifyCanvas),
+                resumeDelayMs = if (isSpotifyCanvas) CANVAS_RESUME_DELAY_MS else 0L,
+                onRenderedChanged = { canvasRendered = it },
+                onCoverChanged = { canvasCover.floatValue = it },
+                bottomFade = when {
+                    isSpotifyCanvas -> 0f
+                    isPortraitCanvas -> 0.24f
+                    else -> 0.42f
+                },
+                bottomFadeEndPx = clipBottomPx,
+                modifier = Modifier
+                    .zIndex(3f)
+                    .align(Alignment.TopStart)
+                    .then(
+                        if (isSpotifyCanvas || isPortraitCanvas) Modifier.fillMaxSize()
+                        else Modifier.fillMaxWidth().height(fullBleedHeight),
+                    ),
+            )
+        }
+
+        // ── 2c. Full-Screen Canvas Dim & Lower Contrast Scrim ──
+        if (canvasRendered && canvas != null && sp > 0.2f && panelProgress < 0.95f) {
+            val canvasLayerFade = (1f - panelProgress * 2f).coerceIn(0f, 1f) * ((sp - 0.2f) / 0.8f).coerceIn(0f, 1f)
+            if (canvasDimAlpha > 0.001f) {
+                Box(
+                    modifier = Modifier
+                        .zIndex(4f)
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = canvasDimAlpha * canvasLayerFade }
+                        .background(Color.Black),
+                )
+            }
+            // Progressive bottom readability gradient so minimized Seek + Prev/Play/Next stay crisp over any video
+            Box(
+                modifier = Modifier
+                    .zIndex(4f)
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .fillMaxHeight(lerpFloat(0.56f, 0.36f, canvasMinimizeProgress))
+                    .graphicsLayer { alpha = canvasLayerFade }
+                    .background(
+                        Brush.verticalGradient(
+                            0.00f to Color.Transparent,
+                            0.28f to Color.Black.copy(alpha = lerpFloat(0.42f, 0.36f, canvasMinimizeProgress)),
+                            1.00f to Color.Black.copy(alpha = lerpFloat(0.68f, 0.72f, canvasMinimizeProgress)),
+                        ),
+                    ),
+            )
+        }
+
+        // ── 2d. Kinetic Synced Lyrics Over Canvas (shown centered above song title only when controls hide) ──
+        val effectiveCanvasLyricsAlpha = canvasKineticLyricsAlpha *
+            ((canvasMinimizeProgress - 0.35f) / 0.65f).coerceIn(0f, 1f) *
+            ((sp - 0.2f) / 0.8f).coerceIn(0f, 1f)
+        if (settingsState.showSyncedLyricsOverCanvas && effectiveCanvasLyricsAlpha > 0.005f) {
+            Box(
+                modifier = Modifier
+                    .zIndex(4.5f)
+                    .fillMaxSize()
+                    .padding(
+                        top = statusBarTopDp + 24.dp,
+                        bottom = navBottomDp + 224.dp,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                CanvasKineticLyricsOverlay(
+                    lyrics = MusicPlayerState.lyrics,
+                    positionMs = displayPos,
+                    lyricsOffsetMs = MusicPlayerState.lyricsOffsetMs,
+                    durationMs = safeDuration,
+                    isPlaying = isPlaying,
+                    visible = showCanvasKineticLyrics,
+                    overlayAlpha = effectiveCanvasLyricsAlpha,
+                    translatedLyrics = translationsBySong[track.id],
+                )
+            }
+        }
+
         // ── 3. In-Player Synced Lyrics Screen ──
         if (isLyricsOpen && panelProgress > 0.001f) {
             Box(
@@ -682,20 +1021,42 @@ fun ITuneMusicPlayer(
         }
 
         // ── 5. Continuous Morphing Artwork Avatar ──
-        // Full bleed across top in music mode, smoothly shrinks into 58dp rounded corner thumbnail
-        // spaced comfortably below the drag handle pill when lyrics or queue opens.
+        // Seamlessly morphs between:
+        // - Classic Square Container (centered 1:1, rounded corners, placeholder with ic_itune_waves)
+        // - Full Bleed Cover Art (when Full Screen Cover Art is ON and image is loaded)
+        // - 58dp Top Left Header Thumbnail (when Lyrics or Queue opens)
+        // - 38dp Bottom Left Mini Player Thumbnail (when swiping down to dismiss player)
+        val defaultPlayerTitleTopDp = maxHeight - 365.dp - navBottomDp
+        val dynamicMeasuredTitleTopDp = if (playerTitleVisualTopPx > 0f) with(density) { playerTitleVisualTopPx.toDp() } else defaultPlayerTitleTopDp
+        val topPillLimit = statusBarTopDp + 18.dp
+        val maxAvailableSquareHeight = (dynamicMeasuredTitleTopDp - topPillLimit - 14.dp).coerceAtLeast(200.dp)
+        val squareArtSize = minOf(maxWidth - 32.dp, maxAvailableSquareHeight).coerceIn(240.dp, 400.dp)
+        // Center square artwork in the generous vertical space above the title and lyrics
+        val squareArtTop = (topPillLimit + 4.dp) + (((dynamicMeasuredTitleTopDp - 12.dp - topPillLimit) - squareArtSize).coerceAtLeast(0.dp) * 0.45f)
+        val squareArtStart = (maxWidth - squareArtSize) / 2
+        val squareArtRadius = 8.dp
+
         val progressClamped = panelProgress.coerceIn(0f, 1f)
-        val fullArtStart = lerpDp(0.dp, 24.dp, panelProgress)
-        val fullArtTop = lerpDp(0.dp, statusBarTopDp + 34.dp, panelProgress)
-        val fullArtWidth = lerpDp(maxWidth, 58.dp, panelProgress).coerceAtLeast(1.dp)
-        val fullArtHeight = lerpDp(fullBleedHeight, 58.dp, panelProgress).coerceAtLeast(1.dp)
-        val fullArtRadius = lerpDp(0.dp, 11.dp, progressClamped).coerceAtLeast(0.dp)
+
+        // Resting dimensions before queue/lyrics open (interpolating between square and full bleed based on coverZoomProgress)
+        val restingArtStart = lerpDp(squareArtStart, 0.dp, coverZoomProgress)
+        val restingArtTop = lerpDp(squareArtTop, 0.dp, coverZoomProgress)
+        val restingArtWidth = lerpDp(squareArtSize, maxWidth, coverZoomProgress)
+        val restingArtHeight = lerpDp(squareArtSize, fullBleedHeight, coverZoomProgress)
+        val restingArtRadius = lerpDp(squareArtRadius, 0.dp, coverZoomProgress)
+
+        // Morphing dimensions when queue or lyrics panel opens (collapses to 58dp top thumbnail)
+        val fullArtStart = lerpDp(restingArtStart, 24.dp, panelProgress)
+        val fullArtTop = lerpDp(restingArtTop, statusBarTopDp + 34.dp, panelProgress)
+        val fullArtWidth = lerpDp(restingArtWidth, 58.dp, panelProgress).coerceAtLeast(1.dp)
+        val fullArtHeight = lerpDp(restingArtHeight, 58.dp, panelProgress).coerceAtLeast(1.dp)
+        val fullArtRadius = lerpDp(restingArtRadius, 6.dp, progressClamped).coerceAtLeast(0.dp)
 
         val miniArtStart = 10.dp
         val miniArtTop = 10.dp
         val miniArtWidth = 38.dp
         val miniArtHeight = 38.dp
-        val miniArtRadius = 6.dp
+        val miniArtRadius = 4.dp
 
         val artStart = lerpDp(miniArtStart, fullArtStart, sp)
         val artTop = lerpDp(miniArtTop, fullArtTop, sp)
@@ -703,16 +1064,40 @@ fun ITuneMusicPlayer(
         val artHeight = lerpDp(miniArtHeight, fullArtHeight, sp)
         val artRadius = lerpDp(miniArtRadius, fullArtRadius, sp).coerceAtLeast(0.dp)
 
+        val effectiveScale = if (coverZoomProgress < 0.5f) squarePlayPauseScale else 1.0f
+
+        val isCanvasActive = (canvas != null && (canvasRendered || canvasCover.floatValue > 0.05f)) && panelProgress < 0.85f
         Box(
             modifier = Modifier
-                .zIndex(35f)
+                .zIndex(if (isCanvasActive) 1f else 35f)
                 .offset { IntOffset(artStart.roundToPx(), artTop.roundToPx()) }
                 .size(width = artWidth, height = artHeight)
+                .graphicsLayer {
+                    val handoff = if (isCanvasActive) 1.0f else (canvasCover.floatValue * (1f - panelProgress * 2f).coerceIn(0f, 1f) *
+                        ((sp - 0.35f) / 0.65f).coerceIn(0f, 1f))
+                    alpha = if (isCanvasActive && panelProgress < 0.1f) 0f else (1f - handoff).coerceIn(0f, 1f)
+                    scaleX = effectiveScale
+                    scaleY = effectiveScale
+                }
+                .shadow(
+                    elevation = lerpDp(16.dp, 0.dp, coverZoomProgress) * (1f - panelProgress) * sp,
+                    shape = RoundedCornerShape(artRadius),
+                    clip = false
+                )
                 .clip(RoundedCornerShape(artRadius))
+                .border(
+                    width = 0.8.dp,
+                    color = Color.White.copy(alpha = (0.24f * (1f - coverZoomProgress) * (1f - panelProgress) * sp).coerceIn(0f, 1f)),
+                    shape = RoundedCornerShape(artRadius)
+                )
                 .then(
                     if (panelProgress > 0.85f) {
                         Modifier
-                            .border(1.dp, Color.White.copy(alpha = (0.22f * panelProgress).coerceIn(0f, 1f)), RoundedCornerShape(artRadius))
+                            .border(
+                                width = 1.dp,
+                                color = Color.White.copy(alpha = (0.22f * panelProgress).coerceIn(0f, 1f)),
+                                shape = RoundedCornerShape(artRadius),
+                            )
                             .clickable {
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                 MusicPlayerState.lyricsOpen = false
@@ -721,6 +1106,30 @@ fun ITuneMusicPlayer(
                     } else Modifier
                 )
         ) {
+            // ── Loading / Placeholder Container: ONLY shown when thumbnail has NOT loaded yet ──
+            if (!isCoverLoaded) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.linearGradient(
+                                listOf(
+                                    Color(0xFF2C2C2E),
+                                    Color(0xFF18181A),
+                                )
+                            )
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_itune_waves),
+                        contentDescription = null,
+                        colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.60f)),
+                        modifier = Modifier.size(52.dp),
+                    )
+                }
+            }
+
             val playerFadeWeight = (1f - panelProgress * 8f).coerceIn(0f, 1f)
             // Move the sharp-to-ambient morph well up the cover so blur reaches the
             // title and controls region in both Dynamic and Static player modes.
@@ -728,48 +1137,61 @@ fun ITuneMusicPlayer(
             val fadeMidAlpha = lerpFloat(1.0f, 0.44f, playerFadeWeight)
             val fadeEndAlpha = lerpFloat(1.0f, 0.0f, playerFadeWeight)
 
+            val maskProgress = ((coverZoomProgress - 0.30f) / 0.70f).coerceIn(0f, 1f)
+            val effectiveFadeStart = lerpFloat(1.0f, fadeStart, maskProgress)
+            val effectiveFadeMidAlpha = lerpFloat(1.0f, fadeMidAlpha, maskProgress)
+            val effectiveFadeEndAlpha = lerpFloat(1.0f, fadeEndAlpha, maskProgress)
+            val hasFadeMask = maskProgress > 0.01f && (effectiveFadeStart < 0.999f || effectiveFadeEndAlpha < 0.999f)
+
             Crossfade(
                 targetState = currentArtUrl,
-                animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
+                animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
                 label = "avatarArtworkCrossfade",
                 modifier = Modifier.fillMaxSize()
             ) { artUrl ->
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(artUrl)
-                        .size(Size.ORIGINAL)
-                        .crossfade(200)
-                        .build(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            compositingStrategy = CompositingStrategy.Offscreen
-                        }
-                        .drawWithContent {
-                            drawContent()
-                            if (fadeStart < 0.999f || fadeEndAlpha < 0.999f) {
-                                val mask = Brush.verticalGradient(
-                                    colorStops = arrayOf(
-                                        0f to Color.Black,
-                                        fadeStart to Color.Black,
-                                        0.58f to Color.Black.copy(alpha = fadeMidAlpha),
-                                        1f to Color.Black.copy(alpha = fadeEndAlpha)
-                                    )
-                                )
-                                drawRect(brush = mask, blendMode = BlendMode.DstIn)
+                if (!artUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(artUrl)
+                            .size(Size.ORIGINAL)
+                            .crossfade(150)
+                            .build(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        onState = { state ->
+                            if (state is AsyncImagePainter.State.Success) {
+                                thumbnailLoadedTrackId = track.id
                             }
-                        }
-                )
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                compositingStrategy = if (hasFadeMask) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+                            }
+                            .drawWithContent {
+                                drawContent()
+                                if (hasFadeMask) {
+                                    val mask = Brush.verticalGradient(
+                                        colorStops = arrayOf(
+                                            0f to Color.Black,
+                                            effectiveFadeStart to Color.Black,
+                                            0.58f to Color.Black.copy(alpha = effectiveFadeMidAlpha),
+                                            1f to Color.Black.copy(alpha = effectiveFadeEndAlpha)
+                                        )
+                                    )
+                                    drawRect(brush = mask, blendMode = BlendMode.DstIn)
+                                }
+                            }
+                    )
+                }
             }
         }
 
         // ── 5b. Continuous Morphing Title & Artist ──
         // Seamlessly morphs between Mini Player position/size and Full Player resting position/size,
         // and glides into the top header when Queue or Lyrics opens.
-        val defaultPlayerTitleTopDp = maxHeight - 398.dp - navBottomDp
-        val startTitleTopPx = if (playerTitleVisualTopPx > 0f) playerTitleVisualTopPx else with(density) { defaultPlayerTitleTopDp.toPx() }
+        val startTitleTopDp = dynamicMeasuredTitleTopDp
+        val startTitleTopPx = with(density) { startTitleTopDp.toPx() }
 
         val fullTitleStartPx = lerpFloat(with(density) { 24.dp.toPx() }, with(density) { 96.dp.toPx() }, panelProgress)
         // Center Title + Artist vertically against the 58dp header avatar (centerY = statusBarTopDp + 63dp)
@@ -799,10 +1221,13 @@ fun ITuneMusicPlayer(
 
         Box(
             modifier = Modifier
-                .zIndex(36f)
+                .zIndex(45f)
                 .offset { IntOffset(curTitleLeftPx.roundToInt(), curTitleTopPx.roundToInt()) }
+                .graphicsLayer {
+                    translationY = (canvasSlideDownPx + compactTitleNudgePx) * (1f - panelProgress) * sp
+                }
                 .width(curTitleWidthDp)
-                .height(if (sp < 0.5f) 38.dp else if (panelProgress < 0.80f) 90.dp else 48.dp)
+                .height(if (sp < 0.5f) 38.dp else if (panelProgress < 0.80f) 96.dp else 48.dp)
                 .then(
                     if (panelProgress > 0.80f) {
                         Modifier.clickable(
@@ -818,8 +1243,7 @@ fun ITuneMusicPlayer(
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clipToBounds(),
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.Top
             ) {
                 Row(
@@ -849,7 +1273,7 @@ fun ITuneMusicPlayer(
                             .basicMarquee()
                     )
                 }
-                Spacer(Modifier.height(lerpDp(lerpDp(1.dp, 3.dp, sp), 2.dp, panelProgress)))
+                Spacer(Modifier.height(lerpDp(lerpDp(1.dp, 2.dp, sp), 1.5.dp, panelProgress)))
                 Text(
                     text = track.artists,
                     style = TextStyle(
@@ -873,11 +1297,11 @@ fun ITuneMusicPlayer(
                     }.basicMarquee()
                 )
 
-                // Send lyrics line a little bit below the artist
-                Spacer(Modifier.height(lerpDp(2.dp, 10.dp, sp)))
+                // Send lyrics line comfortably below the artist, directly centered between artist and seekbar
+                Spacer(Modifier.height(lerpDp(1.dp, 10.dp, sp)))
 
                 AnimatedVisibility(
-                    visible = sp >= 0.5f && panelProgress < 0.80f,
+                    visible = sp >= 0.5f && panelProgress < 0.80f && canvasMinimizeProgress < 0.85f,
                     enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { it / 3 },
                     exit = fadeOut(tween(120)) + slideOutVertically(tween(160)) { -it / 3 }
                 ) {
@@ -899,9 +1323,8 @@ fun ITuneMusicPlayer(
 
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clipToBounds()
-                            .padding(vertical = 2.dp),
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp)),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         Row(
@@ -917,7 +1340,7 @@ fun ITuneMusicPlayer(
                                         MusicPlayerState.refreshLyrics()
                                     }
                                 }
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 1.dp),
                         ) {
                             AnimatedContent(
                                 targetState = displayLyric,
@@ -931,7 +1354,6 @@ fun ITuneMusicPlayer(
                                 label = "lyrics_line_transition",
                                 modifier = Modifier
                                     .weight(1f, fill = false)
-                                    .clipToBounds()
                             ) { line ->
                                 if (line == null || line.text.isBlank()) {
                                     Row(
@@ -973,8 +1395,10 @@ fun ITuneMusicPlayer(
                                         fontFamily = SFProDisplay,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.SemiBold,
+                                        lineHeight = 19.sp,
                                         color = Color.White,
                                         maxLines = 1,
+                                        softWrap = false,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
                                     )
@@ -1029,7 +1453,10 @@ fun ITuneMusicPlayer(
                 .zIndex(40f)
                 .offset { IntOffset(curPlayLeftPx.roundToInt(), curPlayTopPx.roundToInt()) }
                 .size(curPlaySizeDp)
-                .graphicsLayer { alpha = panelControlsAlpha }
+                .graphicsLayer {
+                    alpha = panelControlsAlpha
+                    translationY = canvasSlideDownPx * (1f - panelProgress) * sp
+                }
                 .clip(CircleShape)
                 .clickable {
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -1062,7 +1489,10 @@ fun ITuneMusicPlayer(
                 .zIndex(40f)
                 .offset { IntOffset(curNextLeftPx.roundToInt(), curNextTopPx.roundToInt()) }
                 .size(curNextSizeDp)
-                .graphicsLayer { alpha = panelControlsAlpha * if (canSkipNext) 1f else 0.38f }
+                .graphicsLayer {
+                    alpha = panelControlsAlpha * if (canSkipNext) 1f else 0.38f
+                    translationY = canvasSlideDownPx * (1f - panelProgress) * sp
+                }
                 .clip(CircleShape)
                 .clickable(enabled = canSkipNext) {
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -1088,7 +1518,7 @@ fun ITuneMusicPlayer(
         // Initially positioned beside the 3-dot button at the end of the Title & Artist row in player mode (matching Apple Music),
         // glides smoothly upward into the top header next to the 3-dot button when Queue or Lyrics opens.
         // Kept at the exact same size (36dp, 20dp icon) at both resting player and top header positions.
-        val startStarTopPx = startTitleTopPx + with(density) { 6.dp.toPx() }
+        val startStarTopPx = startTitleTopPx + with(density) { 3.dp.toPx() }
         // Keep Star vertically centered with 58dp avatar (centerY = statusBarTopDp + 63dp -> top = 63 - 18 = 45dp)
         val targetStarTopPx = with(density) { (statusBarTopDp + 45.dp).toPx() }
         val startStarLeftPx = with(density) { (maxWidth - 104.dp).toPx() }
@@ -1105,7 +1535,10 @@ fun ITuneMusicPlayer(
                 .zIndex(37f)
                 .offset { IntOffset(curStarLeftPx.roundToInt(), (curStarTopPx + fullElementsTransY).roundToInt()) }
                 .size(curStarSizeDp)
-                .graphicsLayer { alpha = fullElementsAlpha }
+                .graphicsLayer {
+                    alpha = fullElementsAlpha
+                    translationY = (canvasSlideDownPx + compactTitleNudgePx) * (1f - panelProgress) * sp
+                }
                 .clip(CircleShape)
                 .background(playerAccentColor.copy(alpha = curStarBgAlpha))
                 .clickable {
@@ -1128,7 +1561,7 @@ fun ITuneMusicPlayer(
         // Initially positioned at the far right end of the Title & Artist row in player mode (matching Apple Music),
         // glides smoothly upward into the top-right header corner when Queue or Lyrics opens.
         // Kept at the exact same size (36dp, 22dp icon) at both resting player and top header positions.
-        val startMoreTopPx = startTitleTopPx + with(density) { 6.dp.toPx() }
+        val startMoreTopPx = startTitleTopPx + with(density) { 3.dp.toPx() }
         // Keep 3-dot vertically centered with 58dp avatar (centerY = statusBarTopDp + 63dp -> top = 63 - 18 = 45dp)
         val targetMoreTopPx = with(density) { (statusBarTopDp + 45.dp).toPx() }
         val startMoreLeftPx = with(density) { (maxWidth - 60.dp).toPx() }
@@ -1145,7 +1578,10 @@ fun ITuneMusicPlayer(
                 .zIndex(37f)
                 .offset { IntOffset(curMoreLeftPx.roundToInt(), (curMoreTopPx + fullElementsTransY).roundToInt()) }
                 .size(curMoreSizeDp)
-                .graphicsLayer { alpha = fullElementsAlpha }
+                .graphicsLayer {
+                    alpha = fullElementsAlpha
+                    translationY = (canvasSlideDownPx + compactTitleNudgePx) * (1f - panelProgress) * sp
+                }
                 .clip(CircleShape)
                 .background(playerAccentColor.copy(alpha = curMoreBgAlpha))
                 .clickable {
@@ -1174,8 +1610,9 @@ fun ITuneMusicPlayer(
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
+                .graphicsLayer { alpha = canvasChromeAlpha }
         ) {
-            // iOS Pull Handle Pill (Centered at top in both full player and queue/lyrics header)
+            // iOS Pull Handle Pill
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -1184,25 +1621,6 @@ fun ITuneMusicPlayer(
                     .clip(RoundedCornerShape(2.5.dp))
                     .background(Color.White.copy(alpha = 0.34f))
             )
-
-            // Normal Collapse Chevron (fades out in lyrics or queue mode)
-            IconButton(
-                onClick = onCollapse,
-                modifier = Modifier
-                    .size(44.dp)
-                    .align(Alignment.CenterStart)
-                    .graphicsLayer {
-                        alpha = (1f - panelProgress * 2.5f).coerceIn(0f, 1f)
-                    },
-                enabled = panelProgress < 0.2f
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = "Collapse",
-                    tint = Color.White.copy(alpha = 0.95f),
-                    modifier = Modifier.size(36.dp)
-                )
-            }
 
             // Full Header Tap Target to collapse back to main player in Queue or Lyrics mode
             if (panelProgress > 0.8f) {
@@ -1242,7 +1660,7 @@ fun ITuneMusicPlayer(
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 30.dp)
                 .graphicsLayer {
-                    translationY = controlsTranslationY
+                    translationY = controlsTranslationY + canvasSlideDownPx * (1f - panelProgress) * sp
                     alpha = controlsAlpha * fullElementsAlpha
                 },
             horizontalAlignment = Alignment.CenterHorizontally
@@ -1254,7 +1672,7 @@ fun ITuneMusicPlayer(
                     .height(82.dp)
                     .onGloballyPositioned { coords ->
                         val root = rootBoxCoords
-                        if (root != null && root.isAttached && coords.isAttached) {
+                        if (canvasMinimizeProgress < 0.01f && root != null && root.isAttached && coords.isAttached) {
                             val pos = root.localPositionOf(coords, Offset.Zero)
                             val visualTop = pos.y
                             if (visualTop > 0f) {
@@ -1264,13 +1682,14 @@ fun ITuneMusicPlayer(
                     }
             )
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(8.dp))
 
             // iOS Capsule Seek Bar (Exact same UI as Volume Slider, no waves)
             IosCapsuleSeekSlider(
                 value = displayPos.toFloat(),
                 valueRange = 0f..safeDuration.toFloat(),
                 isSeeking = isSeeking,
+                isLoading = isLoading,
                 onSeekStart = { targetVal ->
                     onLyricsInteraction()
                     isSeeking = true
@@ -1307,8 +1726,13 @@ fun ITuneMusicPlayer(
 
                 // Center Dynamic Audio Engine & Quality Badge Pill (iMusic 128k / Dolby Atmos / 8D Audio / Bit-Perfect)
                 val pillBadge = audioEngineState.pillBadge
+                val saavnStatuses by com.darkxvenom.itune.data.saavn.SaavnQuality.statuses.collectAsStateWithLifecycle()
+                val saavnStatus = if (settingsState.jioSaavnProvider) {
+                    saavnStatuses[track.id]?.takeIf { it != com.darkxvenom.itune.data.saavn.SaavnStatus.FALLBACK }
+                } else null
                 Box(
                     modifier = Modifier
+                            .graphicsLayer { alpha = canvasChromeAlpha }
                             .onGloballyPositioned { coords ->
                                 val root = rootBoxCoords
                                 if (root != null && root.isAttached && coords.isAttached) {
@@ -1322,7 +1746,7 @@ fun ITuneMusicPlayer(
                             }
                             .clip(RoundedCornerShape(14.dp))
                             .background(Color.White.copy(alpha = if (isAudioEnginePopupOpen || !pillBadge.isBrandedITune) 0.18f else 0.12f))
-                            .clickable {
+                            .clickable(enabled = canvasMinimizeProgress < 0.5f) {
                                 lastLyricsInteractionTime = System.currentTimeMillis()
                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                 isMoreMenuOpen = false
@@ -1334,22 +1758,24 @@ fun ITuneMusicPlayer(
                     contentAlignment = Alignment.Center
                 ) {
                     AnimatedContent(
-                        targetState = pillBadge,
+                        targetState = pillBadge to saavnStatus,
                         transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
                         label = "audioEnginePillContent",
-                    ) { badge ->
+                    ) { (badge, saavn) ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Image(
+                        if (!(badge.isBrandedITune && saavn != null)) Image(
                                 painter = painterResource(badge.iconRes),
                                 contentDescription = badge.text,
                                 colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.92f)),
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.size(14.dp)
                             )
-                            if (badge.isBrandedITune) {
+                            if (badge.isBrandedITune && saavn != null) {
+                                SaavnQualityLabel(saavn)
+                            } else if (badge.isBrandedITune) {
                                 Text(
                                     text = buildAnnotatedString {
                                         withStyle(SpanStyle(color = Color(0xFFFF1744))) { append("i") }
@@ -1383,7 +1809,7 @@ fun ITuneMusicPlayer(
                     .fillMaxWidth()
                     .onGloballyPositioned { coords ->
                         val root = rootBoxCoords
-                        if (root != null && root.isAttached && coords.isAttached) {
+                        if (canvasMinimizeProgress < 0.01f && root != null && root.isAttached && coords.isAttached) {
                             val pos = root.localPositionOf(coords, Offset.Zero)
                             if (pos.y > 0f) {
                                 playerControlsVisualTopPx = pos.y
@@ -1421,7 +1847,7 @@ fun ITuneMusicPlayer(
                         .size(72.dp)
                         .onGloballyPositioned { coords ->
                             val root = rootBoxCoords
-                            if (root != null && root.isAttached && coords.isAttached) {
+                            if (canvasMinimizeProgress < 0.01f && root != null && root.isAttached && coords.isAttached) {
                                 val pos = root.localPositionOf(coords, Offset.Zero)
                                 if (pos.x > 0f) {
                                     playerNextVisualLeftPx = pos.x
@@ -1434,14 +1860,26 @@ fun ITuneMusicPlayer(
                 )
             }
 
-            Spacer(Modifier.height(14.dp))
+            // Collapsible Lower Deck (Volume + Bottom Actions + Output label) — slides away cleanly in minimized Canvas mode
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { size ->
+                        if (size.height > 0) lowerDeckHeightPx = size.height.toFloat()
+                    }
+                    .graphicsLayer {
+                        alpha = (1f - canvasMinimizeProgress * 1.45f).coerceIn(0f, 1f)
+                    },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Spacer(Modifier.height(14.dp))
 
-            // ── Volume Slider (iOS Capsule Style) ──
-            IosVolumeSlider(
-                modifier = Modifier.padding(horizontal = 4.dp)
-            )
+                // ── Volume Slider (iOS Capsule Style) ──
+                IosVolumeSlider(
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
 
-            Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(14.dp))
 
             // ── Bottom Action Controls (Bigger, high-contrast icons with balanced horizontal spacing like iOS Apple Music) ──
             Column(
@@ -1592,8 +2030,15 @@ fun ITuneMusicPlayer(
                 }
                 Row(
                     modifier = Modifier
-                        .widthIn(max = 190.dp)
-                        .height(18.dp),
+                        .widthIn(max = 210.dp)
+                        .height(20.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            lastLyricsInteractionTime = System.currentTimeMillis()
+                            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            isAudioOutputPopupOpen = !isAudioOutputPopupOpen
+                        }
+                        .padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
                 ) {
@@ -1636,11 +2081,14 @@ fun ITuneMusicPlayer(
                     }
                 }
             }
+            }
         }
 
         // ── 8. Apple-Styled Floating More Options Popup (Water-Drop Flow Origin from 3-Dot Button) ──
         val moreAnchorXPx = curMoreLeftPx + with(density) { (curMoreSizeDp / 2).toPx() }
-        val moreAnchorYPx = curMoreTopPx + fullElementsTransY + with(density) { (curMoreSizeDp / 2).toPx() }
+        val moreAnchorYPx = curMoreTopPx + fullElementsTransY +
+            (canvasSlideDownPx + compactTitleNudgePx) * (1f - panelProgress) * sp +
+            with(density) { (curMoreSizeDp / 2).toPx() }
         val restingTitleRowTopDp = with(density) { startTitleTopPx.toDp() }
 
         AppleMoreOptionsPopup(
@@ -2083,6 +2531,7 @@ internal fun IosCapsuleSeekSlider(
     valueRange: ClosedFloatingPointRange<Float>,
     isSeeking: Boolean,
     enabled: Boolean = true,
+    isLoading: Boolean = false,
     onSeekStart: (Float) -> Unit,
     onSeekChange: (Float) -> Unit,
     onSeekEnd: (Float) -> Unit,
@@ -2101,6 +2550,24 @@ internal fun IosCapsuleSeekSlider(
         targetValue = displayFraction,
         animationSpec = if (isSeeking) snap() else tween(durationMillis = 250, easing = LinearEasing),
         label = "seekSliderFraction"
+    )
+
+    val isActuallyLoading = isLoading && !isSeeking
+    val loadingAlpha by animateFloatAsState(
+        targetValue = if (isActuallyLoading) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "SeekLoadingAlpha"
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "SeekLoadingInfinite")
+    val loadingProgress by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 950, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "SeekLoadingProgress"
     )
 
     BoxWithConstraints(
@@ -2164,15 +2631,65 @@ internal fun IosCapsuleSeekSlider(
                 .background(Color.White.copy(alpha = 0.22f))
         )
 
-        // Active progress capsule track
-        if (animatedFraction > 0.001f) {
+        // Active progress capsule track (normal playback)
+        if (animatedFraction > 0.001f && loadingAlpha < 0.99f) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(animatedFraction)
                     .height(trackHeight)
                     .clip(trackShape)
+                    .graphicsLayer { alpha = 1f - loadingAlpha }
                     .background(Color.White.copy(alpha = if (enabled) 0.85f else 0.45f))
             )
+        }
+
+        // Red loading animation inside seek bar (matching TopSpringLoadingBar)
+        if (loadingAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(trackHeight)
+                    .clip(trackShape)
+                    .graphicsLayer { alpha = loadingAlpha }
+            ) {
+                // Faint red track guide
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0x28FA2D48))
+                )
+
+                // Constantly moving glowing red beam from left to right
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+
+                    val beamWidth = w * 0.35f
+                    val travelSpan = w + beamWidth * 2f
+                    val headX = -beamWidth + (loadingProgress * travelSpan)
+                    val tailX = headX + beamWidth
+
+                    val beamBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            AppleMusicRed.copy(alpha = 0.40f),
+                            AppleMusicRed,
+                            Color.White,
+                            AppleMusicRed,
+                            AppleMusicRed.copy(alpha = 0.40f),
+                            Color.Transparent
+                        ),
+                        startX = headX,
+                        endX = tailX
+                    )
+
+                    drawRect(
+                        brush = beamBrush,
+                        topLeft = Offset(headX, 0f),
+                        size = ComposeSize(beamWidth, h)
+                    )
+                }
+            }
         }
     }
 }

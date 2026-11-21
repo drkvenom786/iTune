@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.data.repository
 
 import android.content.Context
@@ -17,22 +28,28 @@ object AvatarManager {
     // Observable Compose state for instant multi-screen UI reactivity
     private val _currentAvatarId = mutableIntStateOf(1)
     val currentAvatarId: State<Int> get() = _currentAvatarId
-
-    private var isInitialized = false
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     /**
      * Initializes the avatar manager from SharedPreferences.
+     * Always reloads the saved avatar to guarantee fresh state across account switches.
      */
     fun init(context: Context) {
-        if (isInitialized) return
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedId = prefs.getInt(KEY_SELECTED_AVATAR, 1)
         _currentAvatarId.intValue = savedId.coerceIn(1, TOTAL_AVATARS)
-        isInitialized = true
     }
 
     /**
-     * Saves the chosen avatar permanently to SharedPreferences and updates reactive state.
+     * Forces a reload of the avatar ID from SharedPreferences.
+     */
+    fun reload(context: Context) {
+        init(context)
+    }
+
+    /**
+     * Saves the chosen avatar permanently to SharedPreferences, updates reactive state,
+     * and synchronizes with the active user account.
      */
     fun setAvatar(context: Context, avatarId: Int) {
         val safeId = avatarId.coerceIn(1, TOTAL_AVATARS)
@@ -41,6 +58,7 @@ object AvatarManager {
             .edit()
             .putInt(KEY_SELECTED_AVATAR, safeId)
             .apply()
+        com.darkxvenom.itune.data.account.MultiAccountManager.updateActiveAccountProfile(context, avatarId = safeId)
     }
 
     /**

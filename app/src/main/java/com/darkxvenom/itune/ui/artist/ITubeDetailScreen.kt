@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.artist
 
 import android.os.Build
@@ -124,6 +135,7 @@ import com.darkxvenom.itune.data.artist.ArtistSignature
 import com.darkxvenom.itune.data.artist.ArtistSignatureRepository
 import com.darkxvenom.itune.data.artist.ArtistStateStore
 import com.darkxvenom.itune.data.artist.CanvasArtwork
+import com.darkxvenom.itune.data.canvas.CanvasRepository
 import com.darkxvenom.itune.data.artist.SignatureInkTransformation
 import com.darkxvenom.itune.data.artist.appleCatalogue
 import com.darkxvenom.itune.data.artist.keyColors
@@ -145,6 +157,7 @@ import com.darkxvenom.itune.data.model.playingRowMatcher
 import com.darkxvenom.itune.ui.artist.canvas.CanvasArtworkPlayer
 import com.darkxvenom.itune.ui.artist.components.CoverPlaceholder
 import com.darkxvenom.itune.ui.artist.components.DownloadedBadge
+import com.darkxvenom.itune.ui.artist.components.ExplicitBadge
 import com.darkxvenom.itune.ui.artist.components.ExplicitSongTitle
 import com.darkxvenom.itune.ui.artist.components.FadingText
 import com.darkxvenom.itune.ui.artist.components.LIBRARY_GRID_SPACING
@@ -177,6 +190,9 @@ import com.darkxvenom.itune.ui.artist.icons.ITubeIcons
 import com.darkxvenom.itune.ui.artist.theme.ArtworkPalette
 import com.darkxvenom.itune.ui.artist.theme.ITubeArtistTheme
 import com.darkxvenom.itune.ui.artist.theme.rememberArtworkPalette
+import com.darkxvenom.itune.ui.components.TopSpringLoadingBar
+import com.darkxvenom.itune.ui.components.rememberSpringOverscrollState
+import com.darkxvenom.itune.ui.components.springOverscroll
 import com.darkxvenom.itune.ui.library.PlaylistCollageAvatar
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -281,26 +297,52 @@ fun ITubeDetailScreen(
     downloadedIds: Set<String> = emptySet(),
     onAddSuggested: (Song) -> Unit = {},
     emptyContent: (@Composable () -> Unit)? = null,
+    onRefresh: (() -> Unit)? = null,
+    isRefreshing: Boolean = false,
 ) {
+    val overscrollState = rememberSpringOverscrollState()
+    LaunchedEffect(overscrollState.offset.value) {
+        if (listState.firstVisibleItemIndex == 0 && overscrollState.offset.value > 25f && !isRefreshing) {
+            onRefresh?.invoke()
+        }
+    }
+
+    val detailSettings by com.darkxvenom.itune.data.library.SettingsStore.state.collectAsStateWithLifecycle()
+    val hideExplicit = detailSettings.hideExplicitContent
+
     val rawSongs = (page.songs as? UiState.Success)?.data.orEmpty()
-    val songs = remember(rawSongs, songSort) { rawSongs.sortedForDetail(songSort) }
-    val originalTrackNumbers = remember(rawSongs) {
-        val byTag = rawSongs.useTrackTags()
-        rawSongs.withIndex().associate { (i, s) -> s.videoId to ((if (byTag) s.trackNumber else null) ?: (i + 1)) }
+    val filteredRawSongs = remember(rawSongs, hideExplicit) {
+        if (hideExplicit) rawSongs.filterNot { it.isExplicit == true } else rawSongs
+    }
+    val songs = remember(filteredRawSongs, songSort) { filteredRawSongs.sortedForDetail(songSort) }
+    val originalTrackNumbers = remember(filteredRawSongs) {
+        val byTag = filteredRawSongs.useTrackTags()
+        filteredRawSongs.withIndex().associate { (i, s) -> s.videoId to ((if (byTag) s.trackNumber else null) ?: (i + 1)) }
     }
     val isArtist = page.type == BrowseType.ARTIST
-    val topReleaseId = if (isArtist) page.sections.topRelease()?.browseId else null
+    val isSpotifyArtist = isArtist && page.browseId.startsWith("spotify:artist:")
+    val isSpotifyAlbum = page.type == BrowseType.ALBUM && page.browseId.startsWith("spotify:album:")
+    val visibleSections = remember(page.sections, hideExplicit) {
+        if (!hideExplicit) page.sections
+        else page.sections.mapNotNull { shelf ->
+            val kept = shelf.items.filterNot { it.isExplicit }
+            if (kept.isEmpty()) null else shelf.copy(items = kept)
+        }
+    }
+    val topReleaseId = if (isArtist) visibleSections.topRelease()?.browseId else null
     LaunchedEffect(topReleaseId) { topReleaseId?.let { onLoadReleaseLibrary?.invoke(it) } }
 
     val appleArtVersion by AppleArtistArtRepository.updates.collectAsStateWithLifecycle()
     var appleArt by remember(page.browseId, appleArtVersion) {
-        mutableStateOf(if (isArtist) AppleArtistArtRepository.cached(page.browseId) else null)
+        mutableStateOf(if (isArtist && !isSpotifyArtist) AppleArtistArtRepository.cached(page.browseId) else null)
     }
     val songsLoading = page.songs is UiState.Loading
-    LaunchedEffect(page.browseId, page.title, songsLoading) {
-        if (isArtist && !songsLoading) {
+    LaunchedEffect(page.browseId, page.title, songsLoading, isSpotifyArtist) {
+        if (isArtist && !isSpotifyArtist && !songsLoading) {
             appleArt = AppleArtistArtRepository.artFor(page.browseId, page.title) { page.appleCatalogue() }
                 ?: appleArt
+        } else if (isSpotifyArtist) {
+            appleArt = null
         }
     }
 
@@ -310,7 +352,10 @@ fun ITubeDetailScreen(
     var signature by remember(page.browseId) { mutableStateOf<ArtistSignature?>(null) }
     val nameSettled = !page.title.looksLikeCredit() || page.songs !is UiState.Loading
     LaunchedEffect(page.browseId, page.title, nameSettled, signatureEnabled, signatureBaseUrl, signatureUpdates) {
-        if (!isArtist || !nameSettled) return@LaunchedEffect
+        if (!isArtist || isSpotifyArtist || !nameSettled) {
+            if (isSpotifyArtist) signature = null
+            return@LaunchedEffect
+        }
         val base = ArtistSignatureRepository.effectiveBaseUrl(signatureEnabled, signatureBaseUrl)
         if (base == null) {
             signature = null
@@ -338,16 +383,32 @@ fun ITubeDetailScreen(
 
     val matches = remember(songs, query) { songs.matching(query) }
     val queue = remember(matches) { matches.map { it.value } }
-    val suggested = remember(page.suggestedSongs, query) {
-        page.suggestedSongs.matching(query).map { it.value }
+    val suggested = remember(page.suggestedSongs, query, hideExplicit) {
+        val base = if (hideExplicit) page.suggestedSongs.filterNot { it.isExplicit == true } else page.suggestedSongs
+        base.matching(query).map { it.value }
     }
     val downloadedTint = palette.accent
 
     val artistVideo = appleArt?.videoUrl
+    val detailContext = LocalContext.current
+    val canvasOverCellular = detailSettings.canvasOverCellular
+    val prioritizeSpotifyCanvas = detailSettings.prioritizeSpotifyCanvas
     var canvas by remember(page.browseId) { mutableStateOf<CanvasArtwork?>(null) }
-    LaunchedEffect(isArtist, artistVideo, animatedCanvasEnabled) {
+    LaunchedEffect(isArtist, artistVideo, animatedCanvasEnabled, canvasOverCellular, prioritizeSpotifyCanvas, page.title, page.subtitle) {
+        if (!animatedCanvasEnabled) {
+            canvas = null
+            return@LaunchedEffect
+        }
+        val cm = detailContext.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val metered = cm?.isActiveNetworkMetered == true
+        if (metered && !canvasOverCellular) {
+            canvas = null
+            return@LaunchedEffect
+        }
         if (isArtist) {
-            canvas = artistVideo?.takeIf { animatedCanvasEnabled }?.let { CanvasArtwork(url = it) }
+            canvas = artistVideo?.let { CanvasArtwork(url = it) }
+        } else if (page.type == BrowseType.ALBUM && !isSpotifyAlbum) {
+            canvas = CanvasRepository.canvasForAlbum(page.title, page.subtitle)
         }
     }
 
@@ -383,14 +444,18 @@ fun ITubeDetailScreen(
                         canvas = canvas,
                         artHeight = artHeight,
                         listState = listState,
-                        heroUrl = appleArt?.heroUrl,
+                        heroUrl = appleArt?.heroUrl ?: page.spotifyHeaderImageUrl,
                         modifier = Modifier.matchParentSize(),
                     )
                 }
 
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(
+                            if (onRefresh != null) Modifier.springOverscroll(overscrollState) else Modifier
+                        ),
                     contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()),
                 ) {
                     item(key = "header") {
@@ -446,7 +511,7 @@ fun ITubeDetailScreen(
                         }
                     }
 
-                    val topRelease = if (isArtist) page.sections.topRelease() else null
+                    val topRelease = if (isArtist) visibleSections.topRelease() else null
                     if (topRelease != null) {
                         item(key = "top-release") {
                             TopReleaseCard(
@@ -626,7 +691,7 @@ fun ITubeDetailScreen(
                         }
                     }
 
-                    items(page.sections) { shelf ->
+                    items(visibleSections) { shelf ->
                         val canShowAll = shelf.items.size > ARTIST_ROW_MAX_ITEMS
                         val displayItems = remember(shelf.items) {
                             if (canShowAll) shelf.items.take(ARTIST_ROW_MAX_ITEMS) else shelf.items
@@ -663,10 +728,17 @@ fun ITubeDetailScreen(
                     }
                     if (isArtist) aboutItem()
                 }
+
+                if (onRefresh != null) {
+                    TopSpringLoadingBar(
+                        isVisible = (isRefreshing || (overscrollState.isPullingTop && overscrollState.offset.value > 8f)) && listState.firstVisibleItemIndex == 0,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
             }
         } else {
             ArtistShelfGridPage(
-                shelf = targetShelf,
+                shelf = if (hideExplicit) targetShelf.copy(items = targetShelf.items.filterNot { it.isExplicit }) else targetShelf,
                 palette = palette,
                 onItemClick = onSectionItemClick,
                 onItemLongPress = onSectionItemLongPress,
@@ -788,15 +860,27 @@ private fun ReleaseHeader(
         }
 
         Spacer(Modifier.height(20.dp))
-        Text(
-            text = page.title,
-            style = MaterialTheme.typography.headlineMedium,
-            color = palette.onBackground,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+        val isAlbumExplicit = songs.any { it.isExplicit == true }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
             modifier = Modifier.padding(horizontal = HEADER_GUTTER),
-        )
+        ) {
+            if (isAlbumExplicit) {
+                ExplicitBadge(
+                    color = palette.onBackground.copy(alpha = 0.75f),
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+            }
+            Text(
+                text = page.title,
+                style = MaterialTheme.typography.headlineMedium,
+                color = palette.onBackground,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         if (credit.isNotBlank()) {
             Spacer(Modifier.height(2.dp))
             Text(
@@ -998,6 +1082,7 @@ private fun List<Song>.useTrackTags(): Boolean {
     val numbered = count { (it.trackNumber ?: 0) > 0 }
     return numbered > 0 && numbered >= size / 2
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 private fun ArtistHeader(
@@ -1788,15 +1873,23 @@ private fun TopReleaseCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            FadingText(
-                text = item.title,
-                style = MaterialTheme.typography.titleLarge.copy(
-                    lineHeight = TOP_RELEASE_TITLE_LINE_HEIGHT,
-                    lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None),
-                ),
-                color = palette.onBackground,
-                maxLines = 2,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (item.isExplicit) {
+                    ExplicitBadge(
+                        color = palette.onBackground.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
+                FadingText(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        lineHeight = TOP_RELEASE_TITLE_LINE_HEIGHT,
+                        lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None),
+                    ),
+                    color = palette.onBackground,
+                    maxLines = 2,
+                )
+            }
             Text(
                 text = stringResource(item.recentLabel()),
                 style = MaterialTheme.typography.bodyMedium,
@@ -1877,13 +1970,21 @@ private fun SectionCard(
                 .background(palette.elevated),
         )
         Spacer(Modifier.height(8.dp))
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.titleMedium,
-            color = palette.onBackground,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (item.isExplicit) {
+                ExplicitBadge(
+                    color = palette.onBackground.copy(alpha = 0.75f),
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+            }
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = palette.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Text(
             text = item.subtitle,
             style = MaterialTheme.typography.bodyMedium,

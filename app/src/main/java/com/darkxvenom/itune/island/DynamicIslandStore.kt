@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.island
 
 import android.content.Context
@@ -69,6 +80,14 @@ object DynamicIslandForegroundTracker {
  * Reactive store & SharedPreferences persistence for Dynamic Island geometry, water-drop
  * elasticity physics, visual effects, and overlay service lifecycle.
  */
+fun canDrawOverlaysCompat(context: Context): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        Settings.canDrawOverlays(context)
+    } else {
+        true
+    }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
+
 object DynamicIslandStore {
     private const val PREFS = "itune_dynamic_island_prefs"
 
@@ -177,7 +196,7 @@ object DynamicIslandStore {
         ensureInit(context)
         val appCtx = context.applicationContext
         val cfg = _state.value
-        val canDraw = Settings.canDrawOverlays(appCtx)
+        val canDraw = canDrawOverlaysCompat(appCtx)
         val intent = Intent(appCtx, DynamicIslandService::class.java)
         runCatching {
             if (cfg.enabled && canDraw) {

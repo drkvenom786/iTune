@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.data.library
 
 import android.content.Context
@@ -6,6 +17,7 @@ import androidx.compose.runtime.Immutable
 import com.darkxvenom.itune.backend.MusicTrack
 import com.darkxvenom.itune.data.artist.AppleArtistArtRepository
 import com.darkxvenom.itune.data.artist.ArtistRepository
+import com.darkxvenom.itune.data.auth.YouTubeLibrarySyncManager
 import com.darkxvenom.itune.data.model.ArtistRef
 import com.darkxvenom.itune.data.model.BrowseType
 import com.darkxvenom.itune.data.model.PLAYER_ART_PX
@@ -47,13 +59,30 @@ data class UserPlaylist(
     val updatedAtMs: Long = System.currentTimeMillis(),
     val isGoogleAccount: Boolean = false,
     val ytPlaylistId: String? = null,
+    val isSpotifyAccount: Boolean = false,
+    val spotifyPlaylistId: String? = null,
+    val isPublic: Boolean = false,
+    val coverImageUrl: String? = null,
     val isEditable: Boolean = true,
 ) {
     val artworkUrls: List<String>
-        get() = songs.mapNotNull { it.thumbnailUrl.ifBlank { null } }.distinct().take(4)
+        get() {
+            val fromSongs = songs.mapNotNull { it.thumbnailUrl.ifBlank { null } }.distinct().take(4)
+            return if (fromSongs.isNotEmpty()) fromSongs
+            else listOfNotNull(coverImageUrl?.takeIf { it.isNotBlank() })
+        }
 
     val leadArtwork: String?
         get() = artworkUrls.firstOrNull()
+
+    val shareUrl: String?
+        get() = when {
+            isSpotifyAccount && !spotifyPlaylistId.isNullOrBlank() && spotifyPlaylistId != "liked" ->
+                "https://open.spotify.com/playlist/$spotifyPlaylistId"
+            isGoogleAccount && !ytPlaylistId.isNullOrBlank() ->
+                "https://music.youtube.com/playlist?list=${ytPlaylistId.removePrefix("VL")}"
+            else -> null
+        }
 }
 
 @Immutable
@@ -70,6 +99,7 @@ data class SavedSongMetadata(
     val addedAtMs: Long = System.currentTimeMillis(),
     val isExplicit: Boolean = false,
     val setVideoId: String? = null,
+    val spotifyTrackUri: String? = null,
     val savedLocally: Boolean = true,
     val isYtmSynced: Boolean = false,
 ) {
@@ -182,11 +212,13 @@ data class SavedCollectionEntry(
     val savedLocally: Boolean = true,
     val playlistId: String? = null,
 )
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 object LibraryStore {
     private const val PREFS_NAME = "itune_library_metadata"
     private const val KEY_LIKED_SONGS = "liked_songs_json"
     private const val KEY_RECENT_SONGS = "recent_songs_json"
+    private const val KEY_SPOTIFY_HISTORY = "spotify_history_json"
     private const val KEY_YTM_HISTORY = "ytm_history_songs_json"
     private const val KEY_ARTISTS = "liked_artists_json"
     private const val KEY_ALBUMS = "saved_albums_json"
@@ -216,6 +248,9 @@ object LibraryStore {
 
     private val _recentSongs = MutableStateFlow<List<SavedSongMetadata>>(emptyList())
     val recentSongs: StateFlow<List<SavedSongMetadata>> = _recentSongs.asStateFlow()
+    private val _spotifyHistory = MutableStateFlow<List<SavedSongMetadata>>(emptyList())
+    /** Songs the user played by picking them from Spotify data (kept apart from YouTube plays). */
+    val spotifyHistory: StateFlow<List<SavedSongMetadata>> = _spotifyHistory.asStateFlow()
 
     private val _ytmHistorySongs = MutableStateFlow<List<SavedSongMetadata>>(emptyList())
     val ytmHistorySongs: StateFlow<List<SavedSongMetadata>> = _ytmHistorySongs.asStateFlow()
@@ -240,6 +275,7 @@ object LibraryStore {
             prefs = p
             _likedSongs.value = decodeSongs(p.getString(KEY_LIKED_SONGS, null))
             _recentSongs.value = decodeSongs(p.getString(KEY_RECENT_SONGS, null))
+            _spotifyHistory.value = decodeSongs(p.getString(KEY_SPOTIFY_HISTORY, null))
             _ytmHistorySongs.value = decodeSongs(p.getString(KEY_YTM_HISTORY, null))
             _likedArtists.value = decodeCollections(p.getString(KEY_ARTISTS, null), BrowseType.ARTIST)
             _savedAlbums.value = decodeCollections(p.getString(KEY_ALBUMS, null), BrowseType.ALBUM)
@@ -255,6 +291,7 @@ object LibraryStore {
         synchronized(this) {
             _likedSongs.value = decodeSongs(p.getString(KEY_LIKED_SONGS, null))
             _recentSongs.value = decodeSongs(p.getString(KEY_RECENT_SONGS, null))
+            _spotifyHistory.value = decodeSongs(p.getString(KEY_SPOTIFY_HISTORY, null))
             _ytmHistorySongs.value = decodeSongs(p.getString(KEY_YTM_HISTORY, null))
             _likedArtists.value = decodeCollections(p.getString(KEY_ARTISTS, null), BrowseType.ARTIST)
             _savedAlbums.value = decodeCollections(p.getString(KEY_ALBUMS, null), BrowseType.ALBUM)
@@ -269,16 +306,21 @@ object LibraryStore {
         initialSongs: List<SavedSongMetadata> = emptyList(),
         isGoogleAccount: Boolean = false,
         ytPlaylistId: String? = null,
+        isSpotifyAccount: Boolean = false,
+        spotifyPlaylistId: String? = null,
+        isPublic: Boolean = false,
+        coverImageUrl: String? = null,
     ): UserPlaylist {
         ensureInit(context)
         val cleanName = name.trim().ifBlank { "New Playlist" }
         val now = System.currentTimeMillis()
         val deduped = initialSongs.distinctBy { it.id }
         val cleanYtId = ytPlaylistId?.removePrefix("VL")?.takeIf { it.isNotBlank() }
-        val resolvedId = if (isGoogleAccount && cleanYtId != null) {
-            "yt_$cleanYtId"
-        } else {
-            "up_${now}_${(1000..9999).random()}"
+        val cleanSpId = spotifyPlaylistId?.takeIf { it.isNotBlank() }
+        val resolvedId = when {
+            isGoogleAccount && cleanYtId != null -> "yt_$cleanYtId"
+            isSpotifyAccount && cleanSpId != null -> "sp_$cleanSpId"
+            else -> "up_${now}_${(1000..9999).random()}"
         }
         val playlist = UserPlaylist(
             id = resolvedId,
@@ -288,6 +330,10 @@ object LibraryStore {
             updatedAtMs = now,
             isGoogleAccount = isGoogleAccount,
             ytPlaylistId = cleanYtId,
+            isSpotifyAccount = isSpotifyAccount,
+            spotifyPlaylistId = cleanSpId,
+            isPublic = isPublic,
+            coverImageUrl = coverImageUrl?.takeIf { it.isNotBlank() },
             isEditable = true,
         )
         synchronized(this) {
@@ -296,6 +342,60 @@ object LibraryStore {
             persistUserPlaylists(updated)
         }
         return playlist
+    }
+
+    fun replaceUserPlaylistSongs(
+        context: Context,
+        playlistId: String,
+        songs: List<SavedSongMetadata>,
+        coverImageUrl: String? = null,
+    ) {
+        ensureInit(context)
+        synchronized(this) {
+            val next = _userPlaylists.value.map { pl ->
+                if (pl.id != playlistId) {
+                    pl
+                } else {
+                    pl.copy(
+                        songs = songs.distinctBy { it.id },
+                        coverImageUrl = coverImageUrl?.takeIf { it.isNotBlank() } ?: pl.coverImageUrl,
+                        updatedAtMs = System.currentTimeMillis(),
+                    )
+                }
+            }
+            _userPlaylists.value = next
+            persistUserPlaylists(next)
+        }
+    }
+
+    fun mergeRemoteSpotifyPlaylists(context: Context, remoteSpotifyPlaylists: List<UserPlaylist>) {
+        ensureInit(context)
+        synchronized(this) {
+            val existingById = _userPlaylists.value.associateBy { it.id }
+            val nonSpotify = _userPlaylists.value.filterNot { it.isSpotifyAccount }
+            val cleanRemote = remoteSpotifyPlaylists.map { remote ->
+                val prev = existingById[remote.id]
+                val keptSongs = if (remote.songs.isNotEmpty()) remote.songs else prev?.songs.orEmpty()
+                remote.copy(
+                    isSpotifyAccount = true,
+                    songs = keptSongs,
+                    coverImageUrl = remote.coverImageUrl?.takeIf { it.isNotBlank() } ?: prev?.coverImageUrl,
+                    isPublic = remote.isPublic || (prev?.isPublic == true),
+                )
+            }
+            val combined = nonSpotify + cleanRemote
+            _userPlaylists.value = combined
+            persistUserPlaylists(combined)
+        }
+    }
+
+    fun clearSpotifyAccountDataOnSignOut(context: Context) {
+        ensureInit(context)
+        synchronized(this) {
+            val kept = _userPlaylists.value.filterNot { it.isSpotifyAccount }
+            _userPlaylists.value = kept
+            persistUserPlaylists(kept)
+        }
     }
 
     fun setSongSetVideoIds(
@@ -411,6 +511,9 @@ object LibraryStore {
             _likedSongs.value = updated
             persistSongs(KEY_LIKED_SONGS, updated)
         }
+        if (savedLocally) {
+            YouTubeLibrarySyncManager.pushSongLikeAsync(track.id, true)
+        }
     }
 
     fun removeLikedSong(context: Context, trackId: String) {
@@ -420,6 +523,7 @@ object LibraryStore {
             _likedSongs.value = updated
             persistSongs(KEY_LIKED_SONGS, updated)
         }
+        YouTubeLibrarySyncManager.pushSongLikeAsync(trackId, false)
     }
 
     fun setLikedSongsSavedLocally(context: Context, savedLocally: Boolean) {
@@ -435,6 +539,16 @@ object LibraryStore {
         ensureInit(context)
         if (SettingsStore.isPauseListeningHistory()) return
         val entry = SavedSongMetadata.fromTrack(track)
+        com.darkxvenom.itune.data.spotify.SpotifyHomeRepository.originUri(track.id)?.let { uri ->
+            // Picked from Spotify data → Spotify history; YouTube-origin plays keep going to Recents below.
+            synchronized(this) {
+                val cur = _spotifyHistory.value.filterNot { it.id == track.id }
+                val upd = (listOf(entry.copy(spotifyTrackUri = uri)) + cur).take(MAX_RECENT_SONGS)
+                _spotifyHistory.value = upd
+                persistSongs(KEY_SPOTIFY_HISTORY, upd)
+            }
+            return
+        }
         synchronized(this) {
             val current = _recentSongs.value.filterNot { it.id == track.id }
             val updated = (listOf(entry) + current).take(MAX_RECENT_SONGS)
@@ -478,6 +592,9 @@ object LibraryStore {
             _likedArtists.value = updated
             persistCollections(KEY_ARTISTS, updated)
         }
+        if (savedLocally) {
+            YouTubeLibrarySyncManager.pushArtistSubscriptionAsync(browseId, true)
+        }
         if (thumbnailUrl.isNullOrBlank()) hydrateArtist(context, browseId)
     }
 
@@ -512,6 +629,7 @@ object LibraryStore {
             _likedArtists.value = updated
             persistCollections(KEY_ARTISTS, updated)
         }
+        YouTubeLibrarySyncManager.pushArtistSubscriptionAsync(browseId, false)
     }
 
     fun saveRelease(
@@ -553,6 +671,9 @@ object LibraryStore {
                 _savedAlbums.value = updated
                 persistCollections(KEY_ALBUMS, updated)
             }
+        }
+        if (savedLocally) {
+            YouTubeLibrarySyncManager.pushReleaseSavedAsync(browseId, playlistId, true)
         }
         if (thumbnailUrl.isNullOrBlank() || title.isBlank()) {
             hydrateRelease(context, browseId, resolvedType)
@@ -612,6 +733,7 @@ object LibraryStore {
                 persistCollections(KEY_PLAYLISTS, playlistsUpdated)
             }
         }
+        YouTubeLibrarySyncManager.pushReleaseSavedAsync(browseId, null, false)
     }
 
     fun syncLegacyIds(
@@ -726,6 +848,7 @@ object LibraryStore {
         put("addedAtMs", s.addedAtMs)
         put("isExplicit", s.isExplicit)
         put("setVideoId", s.setVideoId ?: JSONObject.NULL)
+        put("spotifyTrackUri", s.spotifyTrackUri ?: JSONObject.NULL)
         put("savedLocally", s.savedLocally)
         put("isYtmSynced", s.isYtmSynced)
     }
@@ -745,6 +868,7 @@ object LibraryStore {
             addedAtMs = o.optLong("addedAtMs", System.currentTimeMillis()),
             isExplicit = o.optBoolean("isExplicit", false),
             setVideoId = o.optNullableString("setVideoId"),
+            spotifyTrackUri = o.optNullableString("spotifyTrackUri"),
             savedLocally = o.optBoolean("savedLocally", true),
             isYtmSynced = o.optBoolean("isYtmSynced", false),
         )
@@ -1036,6 +1160,10 @@ object LibraryStore {
                     put("updatedAtMs", pl.updatedAtMs)
                     put("isGoogleAccount", pl.isGoogleAccount)
                     put("ytPlaylistId", pl.ytPlaylistId ?: JSONObject.NULL)
+                    put("isSpotifyAccount", pl.isSpotifyAccount)
+                    put("spotifyPlaylistId", pl.spotifyPlaylistId ?: JSONObject.NULL)
+                    put("isPublic", pl.isPublic)
+                    put("coverImageUrl", pl.coverImageUrl ?: JSONObject.NULL)
                     put("isEditable", pl.isEditable)
                 },
             )
@@ -1092,6 +1220,10 @@ object LibraryStore {
                             updatedAtMs = o.optLong("updatedAtMs", System.currentTimeMillis()),
                             isGoogleAccount = o.optBoolean("isGoogleAccount", false),
                             ytPlaylistId = o.optNullableString("ytPlaylistId"),
+                            isSpotifyAccount = o.optBoolean("isSpotifyAccount", false),
+                            spotifyPlaylistId = o.optNullableString("spotifyPlaylistId"),
+                            isPublic = o.optBoolean("isPublic", false),
+                            coverImageUrl = o.optNullableString("coverImageUrl"),
                             isEditable = o.optBoolean("isEditable", true),
                         ),
                     )

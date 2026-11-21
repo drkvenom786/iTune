@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.data.timetravel
 
 import android.content.ContentValues
@@ -150,6 +161,15 @@ class TimeTravelDatabaseHelper private constructor(context: Context) :
         return result
     }
 
+    fun clearPlaybackHistory() {
+        try {
+            val db = writableDatabase
+            db.delete(TABLE_PLAYBACK, null, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing playback history", e)
+        }
+    }
+
     fun restorePlaybackHistory(records: JSONArray) {
         val db = writableDatabase
         db.beginTransaction()
@@ -172,6 +192,7 @@ class TimeTravelDatabaseHelper private constructor(context: Context) :
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     suspend fun getStats(period: ListeningPeriod, endTimeMs: Long = System.currentTimeMillis()): TimeTravelStats =
         withContext(Dispatchers.IO) {

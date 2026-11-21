@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.welcome
 
 import android.app.Activity
@@ -297,10 +308,12 @@ internal fun sampleWelcomeAmbientFrame(progress: Float): WelcomeAmbientFrame {
 fun WelcomeScreen(
     initialName: String = "",
     fromSplash: Boolean = false,
+    isAddingAccount: Boolean = false,
     homeIconBounds: Rect? = null,
     homeTitleBounds: Rect? = null,
     onRevealHomeUnderlay: (String) -> Unit = {},
     onContinue: (String) -> Unit,
+    onCancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val haptics = rememberHaptics()
@@ -428,6 +441,9 @@ fun WelcomeScreen(
         }
     }
 
+    BackHandler(enabled = isAddingAccount && currentStep == WelcomeStep.NAME) {
+        onCancel?.invoke()
+    }
     BackHandler(enabled = currentStep == WelcomeStep.GOOGLE_CONNECT && !showGoogleLogin) {
         currentStep = WelcomeStep.NAME
     }
@@ -881,6 +897,7 @@ fun WelcomeScreen(
         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 private fun WelcomeOutroCenterMessage(

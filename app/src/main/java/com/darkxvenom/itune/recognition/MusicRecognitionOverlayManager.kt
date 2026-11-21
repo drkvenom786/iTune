@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.recognition
 
 import android.animation.ValueAnimator
@@ -62,7 +73,8 @@ object MusicRecognitionOverlayManager {
     @SuppressLint("ClickableViewAccessibility")
     fun show(context: Context) {
         mainHandler.post {
-            if (!Settings.canDrawOverlays(context)) {
+            val canDraw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else true
+            if (!canDraw) {
                 Log.w(TAG, "Cannot draw overlay: permission not granted")
                 return@post
             }
@@ -289,6 +301,7 @@ object MusicRecognitionOverlayManager {
             startRecognition(context)
         }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     private fun startRecognition(context: Context) {
         val root = overlayView ?: return

@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.backend
 
 import android.content.Context
@@ -68,12 +79,18 @@ object MusicBackend {
         if (initialized) return
         try {
             NewPipe.init(NewPipeDownloader.instance)
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
+            // Enable iOS client streams to reliably bypass Google CDN 403 Forbidden and bot-check throttling
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
             initialized = true
-            Log.d(TAG, "NewPipeExtractor initialized successfully")
+            Log.d(TAG, "NewPipeExtractor initialized successfully with iOS client fallback")
         } catch (e: Exception) {
             Log.e(TAG, "Failed initializing NewPipe: ${e.message}", e)
         }
+    }
+
+    fun invalidateStreamCache(videoId: String) {
+        streamCache.remove(videoId)
+        Log.d(TAG, "Invalidated stream cache for videoId: $videoId")
     }
 
     suspend fun searchMusic(query: String): List<MusicTrack> = withContext(Dispatchers.IO) {
@@ -668,11 +685,13 @@ object MusicBackend {
         )
     }
 
-    suspend fun getOrLoadStreamInfo(videoId: String): StreamInfo = withContext(Dispatchers.IO) {
+    suspend fun getOrLoadStreamInfo(videoId: String, forceRefresh: Boolean = false): StreamInfo = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        streamCache[videoId]?.let { cached ->
-            if (now - cached.fetchedAtMs < STREAM_CACHE_TTL_MS) {
-                return@withContext cached.info
+        if (!forceRefresh) {
+            streamCache[videoId]?.let { cached ->
+                if (now - cached.fetchedAtMs < STREAM_CACHE_TTL_MS) {
+                    return@withContext cached.info
+                }
             }
         }
         val url = "https://www.youtube.com/watch?v=$videoId"
@@ -809,9 +828,29 @@ object MusicBackend {
         videoId: String,
         forceLossless: Boolean? = null,
         targetQuality: String? = null,
+        forceRefresh: Boolean = false,
+        excludedUrls: Set<String> = emptySet(),
+        title: String? = null,
+        artist: String? = null,
     ): String? = withContext(Dispatchers.IO) {
         try {
-            val info = getOrLoadStreamInfo(videoId)
+            com.darkxvenom.itune.audio.StreamTraceStore.begin(videoId)
+            // Optional JioSaavn provider: tried first, any miss falls through to YouTube below.
+            if (SettingsStore.state.value.jioSaavnProvider && !title.isNullOrBlank() && !artist.isNullOrBlank()) {
+                if (forceRefresh) {
+                    // A retry means the previous stream failed: don't hand the same provider back.
+                    com.darkxvenom.itune.data.saavn.SaavnQuality.set(videoId, com.darkxvenom.itune.data.saavn.SaavnStatus.FALLBACK)
+                } else {
+                    val blocked = appContext?.let(::isCellularConnection) == true &&
+                        SettingsStore.state.value.cellularStreaming.equals("Off", ignoreCase = true)
+                    if (!blocked) {
+                        com.darkxvenom.itune.data.saavn.JioSaavnProvider.resolve(videoId, title, artist, excludedUrls)
+                            ?.let { return@withContext it }
+                    }
+                }
+            }
+            com.darkxvenom.itune.audio.StreamTraceStore.addStep(videoId, "Asked YouTube Music (stream extractor) for watch?v=$videoId")
+            val info = getOrLoadStreamInfo(videoId, forceRefresh = forceRefresh)
 
             val audioStreams = info.audioStreams
             if (audioStreams.isNullOrEmpty()) {
@@ -822,9 +861,13 @@ object MusicBackend {
             val progressiveCandidates = audioStreams.filter {
                 it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP &&
                     it.audioTrackType != AudioTrackType.DUBBED &&
-                    !it.content.isNullOrBlank()
+                    !it.content.isNullOrBlank() &&
+                    it.content !in excludedUrls
             }
             val candidates = progressiveCandidates.ifEmpty {
+                audioStreams.filter { !it.content.isNullOrBlank() && it.content !in excludedUrls }
+            }.ifEmpty {
+                // If all were excluded, fall back to any available candidate
                 audioStreams.filter { !it.content.isNullOrBlank() }
             }
 
@@ -853,6 +896,23 @@ object MusicBackend {
 
             val chosen = pickAudioStream(candidates, isLossless, userQuality) ?: candidates.firstOrNull()
             val effectiveQuality = if (isLossless) "Lossless (Max)" else userQuality
+            chosen?.let { c ->
+                val kb = c.averageBitrate
+                val fmt = c.format?.name ?: "audio"
+                val prev = com.darkxvenom.itune.audio.StreamTraceStore.traces.value[videoId]?.steps.orEmpty()
+                com.darkxvenom.itune.audio.StreamTraceStore.put(
+                    videoId,
+                    com.darkxvenom.itune.audio.StreamTrace(
+                        source = "YouTube Music",
+                        quality = if (kb > 0) "$kb kbps • $fmt" else fmt,
+                        steps = prev + listOf(
+                            "Found ${candidates.size} audio stream(s)",
+                            "Mode: ${if (isLossless) "Lossless (Max) — highest bitrate" else "target quality $userQuality"}${if (onCellular) " (cellular)" else ""}",
+                            "Picked $fmt @ ${if (kb > 0) "$kb kbps" else "unknown bitrate"}",
+                        ),
+                    ),
+                )
+            }
             Log.d(TAG, "Selected stream for $videoId (lossless=$isLossless, quality=$effectiveQuality): format=${chosen?.format}, bitrate=${chosen?.averageBitrate} kbps")
             return@withContext chosen?.content
         } catch (e: Exception) {
@@ -871,7 +931,11 @@ object MusicBackend {
         videoId: String,
         forceLossless: Boolean? = null,
         targetQuality: String? = null,
-    ): String? = resolveAudioStream(videoId, forceLossless, targetQuality)
+        forceRefresh: Boolean = false,
+        excludedUrls: Set<String> = emptySet(),
+        title: String? = null,
+        artist: String? = null,
+    ): String? = resolveAudioStream(videoId, forceLossless, targetQuality, forceRefresh, excludedUrls, title, artist)
 
     data class CacheStreamChoice(val url: String, val bitrateKbps: Int)
 
@@ -1412,6 +1476,7 @@ internal fun JSONObject.walk(visit: (key: String, obj: JSONObject) -> Unit) {
         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 private fun JSONArray.walkArray(visit: (key: String, obj: JSONObject) -> Unit) {
     for (i in 0 until length()) {

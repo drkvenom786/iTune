@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.library
 
 import androidx.compose.animation.AnimatedContent
@@ -53,6 +64,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,7 +91,11 @@ import com.darkxvenom.itune.data.auth.YouTubeLibrarySyncManager
 import com.darkxvenom.itune.data.library.LibraryDestination
 import com.darkxvenom.itune.data.library.LibraryStore
 import com.darkxvenom.itune.data.library.SavedCollectionEntry
+import com.darkxvenom.itune.data.library.SavedSongMetadata
 import com.darkxvenom.itune.data.library.UserPlaylist
+import com.darkxvenom.itune.data.spotify.SpotifyLibrarySyncManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.darkxvenom.itune.data.model.BrowseType
 import com.darkxvenom.itune.data.model.CARD_ART_PX
 import com.darkxvenom.itune.data.model.DetailPage
@@ -198,6 +214,10 @@ fun LibraryPlaylistsScreen(
     onBack: () -> Unit,
     onExploreClick: () -> Unit,
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        SpotifyLibrarySyncManager.launchSync(context)
+    }
     var showPlaylistImport by remember { mutableStateOf(false) }
     if (showPlaylistImport) {
         PlaylistImportDialog(onDismiss = { showPlaylistImport = false })
@@ -687,6 +707,7 @@ fun LibraryAlbumsScreen(
         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 fun LibrarySongsScreen(
@@ -962,6 +983,15 @@ private fun LibraryCollectionGlassCard(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
+                if (entry.type == BrowseType.PLAYLIST) {
+                    PlaylistSourceCornerBadge(
+                        isGoogleAccount = true,
+                        isSpotifyAccount = false,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(6.dp),
+                    )
+                }
                 IconButton(
                     onClick = onMenuClick,
                     modifier = Modifier
@@ -1123,9 +1153,69 @@ fun UserPlaylistDetailScreen(
     onBack: () -> Unit,
     onExploreClick: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val userPlaylists by LibraryStore.userPlaylists.collectAsStateWithLifecycle()
     val playlist = remember(userPlaylists, playlistId) {
         userPlaylists.firstOrNull { it.id == playlistId }
+    }
+    var spotifyHydrating by remember(playlist?.id) {
+        mutableStateOf(playlist?.isSpotifyAccount == true && playlist.songs.isEmpty())
+    }
+    var isRefreshing by remember { mutableStateOf(false) }
+
+    val handleRefresh: () -> Unit = {
+        if (!isRefreshing && playlist != null) {
+            isRefreshing = true
+            val countBefore = playlist.songs.size
+            scope.launch {
+                try {
+                    when {
+                        playlist.isSpotifyAccount -> {
+                            SpotifyLibrarySyncManager.hydratePlaylistTracks(context, playlist.id)
+                        }
+                        playlist.isGoogleAccount -> {
+                            val ytBrowseId = playlist.ytPlaylistId ?: ("VL" + playlist.id.removePrefix("VL"))
+                            runCatching {
+                                val page = com.darkxvenom.itune.data.artist.ArtistRepository.browseSongs(ytBrowseId).getOrNull()
+                                val fetched = page?.songs
+                                if (!fetched.isNullOrEmpty()) {
+                                    val newMeta = fetched.map { s -> SavedSongMetadata.fromSong(s) }
+                                    LibraryStore.replaceUserPlaylistSongs(context, playlist.id, newMeta)
+                                }
+                            }
+                        }
+                        else -> {
+                            delay(400L)
+                        }
+                    }
+                    val updatedPl = LibraryStore.userPlaylists.value.firstOrNull { it.id == playlist.id }
+                    val countAfter = updatedPl?.songs?.size ?: countBefore
+                    val newSongs = (countAfter - countBefore).coerceAtLeast(0)
+                    if (newSongs > 0) {
+                        controller.showToast("$newSongs new ${if (newSongs == 1) "song" else "songs"} added")
+                    } else {
+                        controller.showToast("Playlist is up to date")
+                    }
+                } catch (e: Exception) {
+                    controller.showToast("Failed to refresh playlist")
+                } finally {
+                    isRefreshing = false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(playlist?.id, playlist?.isSpotifyAccount) {
+        val pl = playlist ?: return@LaunchedEffect
+        if (pl.isSpotifyAccount) {
+            if (pl.songs.isEmpty()) spotifyHydrating = true
+            try {
+                SpotifyLibrarySyncManager.hydratePlaylistTracks(context, pl.id)
+            } finally {
+                spotifyHydrating = false
+            }
+        }
     }
     val rawMeta = playlist?.songs.orEmpty()
     val sort = controller.songSort
@@ -1174,14 +1264,19 @@ fun UserPlaylistDetailScreen(
         return
     }
 
-    val playlistPage = remember(playlist, sortedSongs) {
+    val playlistSubtitle = when {
+        playlist.isSpotifyAccount -> if (playlist.isPublic) "Spotify Playlist • Public" else "Spotify Playlist"
+        playlist.isGoogleAccount -> if (playlist.isPublic) "YouTube Music • Public" else "YouTube Music"
+        else -> "Local Playlist"
+    }
+    val playlistPage = remember(playlist, sortedSongs, spotifyHydrating) {
         DetailPage(
             browseId = playlist.id,
             title = playlist.name,
-            subtitle = "Playlist",
+            subtitle = playlistSubtitle,
             thumbnailUrl = playlist.leadArtwork,
             collageArtworkUrls = playlist.artworkUrls,
-            songs = UiState.Success(sortedSongs),
+            songs = if (spotifyHydrating && sortedSongs.isEmpty()) UiState.Loading else UiState.Success(sortedSongs),
             type = BrowseType.PLAYLIST,
             library = LibraryState(playlistId = playlist.id, saved = true),
         )
@@ -1213,7 +1308,34 @@ fun UserPlaylistDetailScreen(
                         page = playlistPage,
                         currentSong = currentSong,
                         isPlaying = isPlaying,
-                        onSongClick = { queue, index -> controller.playSongs(queue, index) },
+                        onSongClick = { queue, index ->
+                            val tapped = queue.getOrNull(index)
+                            if (tapped != null && SpotifyLibrarySyncManager.isUnresolvedSpotifyTrackId(tapped.videoId)) {
+                                val meta = rawMeta.firstOrNull { it.id == tapped.videoId }
+                                if (meta != null) {
+                                    controller.showToast("Loading \"${meta.title}\"…")
+                                    scope.launch {
+                                        val resolved = SpotifyLibrarySyncManager.resolveSingleTrackOnDemand(meta)
+                                        if (resolved != null) {
+                                            val playableQueue = queue.mapIndexed { i, s ->
+                                                if (i == index) resolved else if (SpotifyLibrarySyncManager.isUnresolvedSpotifyTrackId(s.videoId)) null else s.toMusicTrack()
+                                            }.filterNotNull()
+                                            val targetIdx = playableQueue.indexOfFirst { it.id == resolved.id }.coerceAtLeast(0)
+                                            MusicPlayerState.play(resolved, playableQueue, expandPlayer = true)
+                                            if (targetIdx < 0) Unit
+                                        } else {
+                                            controller.showToast("Couldn't find \"${meta.title}\" to play")
+                                        }
+                                    }
+                                }
+                            } else {
+                                val playable = queue.filterNot { SpotifyLibrarySyncManager.isUnresolvedSpotifyTrackId(it.videoId) }
+                                val mappedIdx = tapped?.let { t -> playable.indexOfFirst { it.videoId == t.videoId } }?.takeIf { it >= 0 } ?: 0
+                                if (playable.isNotEmpty()) {
+                                    controller.playSongs(playable, mappedIdx)
+                                }
+                            }
+                        },
                         onSongLongPress = { song -> controller.openSongMenu(song) },
                         onSongSwipe = { song ->
                             MusicPlayerState.playNext(song.toMusicTrack())
@@ -1259,6 +1381,8 @@ fun UserPlaylistDetailScreen(
                                 )
                             }
                         },
+                        onRefresh = handleRefresh,
+                        isRefreshing = isRefreshing || spotifyHydrating,
                     )
                 }
 
@@ -1348,23 +1472,13 @@ private fun UserPlaylistGlassCard(
                     cornerRadius = 14.dp,
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (playlist.isGoogleAccount) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(6.dp)
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(Color.White),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        androidx.compose.foundation.Image(
-                            painter = painterResource(R.drawable.ic_google_logo),
-                            contentDescription = "Google Account Playlist",
-                            modifier = Modifier.size(14.dp),
-                        )
-                    }
-                }
+                PlaylistSourceCornerBadge(
+                    isGoogleAccount = playlist.isGoogleAccount,
+                    isSpotifyAccount = playlist.isSpotifyAccount,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp),
+                )
                 IconButton(
                     onClick = onMenuClick,
                     modifier = Modifier
@@ -1404,8 +1518,20 @@ private fun UserPlaylistGlassCard(
                 )
             }
             val subText = buildString {
-                append(if (playlist.songs.size == 1) "1 song" else "${playlist.songs.size} songs")
-                if (playlist.isGoogleAccount) append(" • Google")
+                if (playlist.isSpotifyAccount && playlist.songs.isEmpty()) {
+                    append("Spotify")
+                    if (playlist.isPublic) append(" • Public")
+                } else {
+                    append(if (playlist.songs.size == 1) "1 song" else "${playlist.songs.size} songs")
+                    when {
+                        playlist.isGoogleAccount -> append(" • Google")
+                        playlist.isSpotifyAccount -> append(" • Spotify")
+                        else -> append(" • Local")
+                    }
+                    if (playlist.isPublic && (playlist.isGoogleAccount || playlist.isSpotifyAccount)) {
+                        append(" • Public")
+                    }
+                }
             }
             Text(
                 text = subText,

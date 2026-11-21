@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.components
 
 import android.os.Build
@@ -54,8 +65,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import com.darkxvenom.itune.data.account.MultiAccountManager
 import com.darkxvenom.itune.data.repository.AvatarManager
 import com.darkxvenom.itune.ui.theme.AppleMusicRed
 import com.darkxvenom.itune.ui.theme.AppleTextPrimary
@@ -72,8 +85,10 @@ fun AvatarSelectionDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val currentSavedId = AvatarManager.currentAvatarId.value
-    var selectedId by remember { mutableIntStateOf(currentSavedId) }
+    val activeAccount by MultiAccountManager.activeAccount.collectAsStateWithLifecycle()
+    val currentSavedId = activeAccount?.avatarId ?: AvatarManager.currentAvatarId.value
+    var selectedId by remember(currentSavedId) { mutableIntStateOf(currentSavedId) }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     Dialog(
         onDismissRequest = onDismiss,

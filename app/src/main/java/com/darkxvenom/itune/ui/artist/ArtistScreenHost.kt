@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.artist
 
 import android.content.Context
@@ -65,6 +76,8 @@ import com.darkxvenom.itune.ui.library.IosInMenuPlaylistHost
 import com.darkxvenom.itune.ui.library.PendingPlaylistPayload
 import com.darkxvenom.itune.data.model.BrowseTarget
 import com.darkxvenom.itune.data.model.BrowseType
+import com.darkxvenom.itune.data.spotify.SpotifyDetail
+import com.darkxvenom.itune.data.spotify.SpotifyHomeRepository
 import com.darkxvenom.itune.data.model.DetailPage
 import com.darkxvenom.itune.data.model.HomeShelf
 import com.darkxvenom.itune.data.model.LibraryState
@@ -114,6 +127,8 @@ import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -279,7 +294,26 @@ class ArtistHostController internal constructor(
             type = resolvedType,
         )
         scope.launch {
-            if (resolvedType == BrowseType.ARTIST) {
+            if (browseId.startsWith("spotify:")) {
+                runCatching { SpotifyDetail.load(browseId, title, thumbnailUrl) }.fold(
+                    onSuccess = { sp ->
+                        val stamped = sp.songs.map {
+                            it.copy(playbackSource = sp.title, playbackSourceType = PlaybackSourceType.BROWSE, playbackSourceId = browseId)
+                        }
+                        replacePage(browseId) { existing ->
+                            existing.copy(
+                                title = sp.title, subtitle = sp.subtitle, thumbnailUrl = sp.thumbnailUrl ?: existing.thumbnailUrl,
+                                songs = UiState.Success(stamped), sections = sp.sections, description = sp.description,
+                                monthlyListenerCount = sp.followers,
+                                spotifyHeaderImageUrl = sp.headerImageUrl,
+                            )
+                        }
+                    },
+                    onFailure = { err ->
+                        replacePage(browseId) { it.copy(songs = UiState.Error(err.message ?: "Failed to load from Spotify")) }
+                    },
+                )
+            } else if (resolvedType == BrowseType.ARTIST) {
                 ArtistRepository.artistPage(browseId).fold(
                     onSuccess = { page ->
                         val stamped = page.songs.map { song ->
@@ -433,6 +467,23 @@ class ArtistHostController internal constructor(
 
     fun playSongs(songs: List<Song>, index: Int, page: DetailPage? = null, shuffle: Boolean = false) {
         if (songs.isEmpty()) return
+        if (songs.any { it.videoId.startsWith("sp:") || it.videoId.startsWith("spe:") }) {
+            // Spotify tracks: find each on YouTube Music (tapped song + next 25) then play
+            scope.launch {
+                val start = if (shuffle) 0 else index.coerceIn(songs.indices)
+                val window = (if (shuffle) songs.shuffled() else songs.drop(start)).take(26)
+                val tracks = coroutineScope {
+                    window.map { s -> async { SpotifyHomeRepository.matchSong(s) } }
+                        .mapNotNull { it.await() }
+                }
+                if (tracks.isEmpty()) showToast("Couldn't find this song on YouTube Music")
+                else {
+                    SpotifyHomeRepository.markOrigin(tracks.map { it.id })
+                    MusicPlayerState.play(tracks.first(), tracks, expandPlayer = false)
+                }
+            }
+            return
+        }
         val albumTitle = page?.takeIf { it.type == BrowseType.ALBUM }?.title
         val normalized = songs.map { s ->
             val withAlbum = if (albumTitle != null && s.albumName.isNullOrBlank()) {
@@ -527,6 +578,7 @@ class ArtistHostController internal constructor(
             list.map { song ->
                 song.copy(
                     albumName = if (target.type == BrowseType.ALBUM) song.albumName ?: target.title else song.albumName,
+                    thumbnailUrl = song.thumbnailUrl?.takeIf { it.isNotBlank() } ?: target.thumbnailUrl,
                     playbackSource = target.title,
                     playbackSourceType = PlaybackSourceType.BROWSE,
                     playbackSourceId = target.browseId,
@@ -574,23 +626,7 @@ class ArtistHostController internal constructor(
     fun downloadSongs(songs: List<Song>) {
         if (songs.isEmpty()) return
         showToast("Starting download for ${songs.size} tracks...")
-        scope.launch {
-            for (song in songs) {
-                try {
-                    val options = withContext(Dispatchers.IO) {
-                        MusicBackend.extractAudioQualities(song.videoId)
-                    }
-                    val best = options.firstOrNull()
-                    if (best != null) {
-                        AudioDownloader.download(context, song.toMusicTrack(), best)
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    // Continue remaining tracks in the collection.
-                }
-            }
-        }
+        AudioDownloader.downloadTracks(context, songs.map { it.toMusicTrack() })
     }
 
     fun shareUrl(title: String, url: String) {
@@ -677,6 +713,7 @@ fun rememberArtistHostController(): ArtistHostController {
         )
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 fun ArtistScreenOverlayContent(
@@ -895,7 +932,7 @@ fun ArtistScreenOverlayContent(
                                     onClick = {
                                         controller.shareUrl(
                                             effectivePage.title,
-                                            "https://music.youtube.com/channel/${effectivePage.browseId}",
+                                            (SpotifyDetail.link(effectivePage.browseId) ?: "https://music.youtube.com/channel/${effectivePage.browseId}"),
                                         )
                                     },
                                 ) {
@@ -1088,7 +1125,7 @@ fun ArtistScreenOverlayPopups(
                             controller.clearMenus()
                             controller.shareUrl(
                                 song.title,
-                                "https://music.youtube.com/watch?v=${song.videoId}",
+                                (SpotifyDetail.link(song.videoId) ?: "https://music.youtube.com/watch?v=${song.videoId}"),
                             )
                         },
                     )
@@ -1178,7 +1215,7 @@ fun ArtistScreenOverlayPopups(
                     },
                     onShare = {
                         controller.clearMenus()
-                        val url = when (target.type) {
+                        val url = SpotifyDetail.link(target.browseId) ?: when (target.type) {
                             BrowseType.ARTIST -> "https://music.youtube.com/channel/${target.browseId}"
                             BrowseType.PLAYLIST -> "https://music.youtube.com/playlist?list=${target.browseId.removePrefix("VL")}"
                             else -> "https://music.youtube.com/browse/${target.browseId}"
@@ -1342,6 +1379,9 @@ fun ArtistScreenOverlayPopups(
 }
 
 private fun browseTypeOf(browseId: String, hint: BrowseType): BrowseType = when {
+    browseId.startsWith("spotify:artist:") -> BrowseType.ARTIST
+    browseId.startsWith("spotify:album:") -> BrowseType.ALBUM
+    browseId.startsWith("spotify:") -> BrowseType.PLAYLIST
     browseId.startsWith("UC") -> BrowseType.ARTIST
     browseId.startsWith("MPRE") || browseId.startsWith("OLAK") -> BrowseType.ALBUM
     browseId.startsWith("VL") || browseId.startsWith("PL") -> BrowseType.PLAYLIST

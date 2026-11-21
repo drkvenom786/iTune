@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.library
 
 import android.content.Context
@@ -40,6 +51,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material3.Icon
@@ -454,6 +466,7 @@ class LibraryHostController internal constructor(
             val stamped = loaded.map { song ->
                 song.copy(
                     albumName = if (entry.type == BrowseType.ALBUM) song.albumName ?: entry.title else song.albumName,
+                    thumbnailUrl = song.thumbnailUrl?.takeIf { it.isNotBlank() } ?: entry.thumbnailUrl,
                     playbackSource = entry.title,
                     playbackSourceType = PlaybackSourceType.BROWSE,
                     playbackSourceId = entry.browseId,
@@ -516,9 +529,7 @@ class LibraryHostController internal constructor(
             return
         }
         showToast("Queuing ${songs.size} tracks for download...")
-        scope.launch {
-            songs.take(25).forEach { downloadSong(it) }
-        }
+        AudioDownloader.downloadTracks(context, songs.map { it.toMusicTrack() })
     }
 
     fun removeCollection(entry: SavedCollectionEntry) {
@@ -869,6 +880,7 @@ fun LibraryTopBarActionButtons(
         )
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 fun LibraryGlassPillButton(
@@ -1413,6 +1425,19 @@ fun LibraryScreenOverlayPopups(
                             controller.clearMenus()
                             controller.openUserPlaylist(pl.id)
                         },
+                        onShareLink = pl.shareUrl?.let { url ->
+                            {
+                                controller.clearMenus()
+                                sharePlaylistLink(controller.context, pl.name, url)
+                            }
+                        },
+                        onCopyLink = pl.shareUrl?.let { url ->
+                            {
+                                controller.clearMenus()
+                                copyPlaylistShareLink(controller.context, pl.name, url)
+                                controller.showToast("Share link copied")
+                            }
+                        },
                         onRename = onOpenRename,
                         onDelete = {
                             controller.clearMenus()
@@ -1549,6 +1574,26 @@ fun LibraryScreenOverlayPopups(
                         }
                         req.userPlaylist?.let { pl ->
                             IosMenuSeparator()
+                            pl.shareUrl?.let { url ->
+                                IosMenuRow(
+                                    label = "Share Playlist Link",
+                                    description = if (pl.isSpotifyAccount) "Spotify link" else "YouTube Music link",
+                                    icon = SfIcons.Share,
+                                    onClick = {
+                                        controller.clearMenus()
+                                        sharePlaylistLink(controller.context, pl.name, url)
+                                    },
+                                )
+                                IosMenuRow(
+                                    label = "Copy Share Link",
+                                    icon = Icons.Rounded.ContentCopy,
+                                    onClick = {
+                                        controller.clearMenus()
+                                        copyPlaylistShareLink(controller.context, pl.name, url)
+                                        controller.showToast("Share link copied")
+                                    },
+                                )
+                            }
                             IosMenuRow(
                                 label = "Rename Playlist",
                                 icon = Icons.Rounded.Edit,
@@ -1689,6 +1734,8 @@ private fun LibraryUserPlaylistActionsMenu(
     onStartRadio: () -> Unit,
     onAddToQueue: () -> Unit,
     onOpen: () -> Unit,
+    onShareLink: (() -> Unit)? = null,
+    onCopyLink: (() -> Unit)? = null,
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -1733,6 +1780,21 @@ private fun LibraryUserPlaylistActionsMenu(
                 label = stringResource(R.string.open_playlist),
                 onClick = onOpen,
             )
+            if (onShareLink != null) {
+                ActionRow(
+                    icon = SfIcons.Share,
+                    label = "Share Playlist Link",
+                    description = if (playlist.isSpotifyAccount) "Spotify link" else "YouTube Music link",
+                    onClick = onShareLink,
+                )
+            }
+            if (onCopyLink != null) {
+                ActionRow(
+                    icon = Icons.Rounded.ContentCopy,
+                    label = "Copy Share Link",
+                    onClick = onCopyLink,
+                )
+            }
             ActionRow(
                 icon = Icons.Rounded.Edit,
                 label = "Rename Playlist",

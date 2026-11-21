@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.home
 
 import android.Manifest
@@ -65,6 +76,7 @@ import com.darkxvenom.itune.data.library.HomeFeedRepository
 import com.darkxvenom.itune.data.library.LibraryStore
 import com.darkxvenom.itune.data.library.ListeningProfileStore
 import com.darkxvenom.itune.data.model.HomeFeedItem
+import com.darkxvenom.itune.data.spotify.SpotifyHomeRepository
 import com.darkxvenom.itune.data.model.HomeFeedShelf
 import com.darkxvenom.itune.data.model.HomeHeroCard
 import com.darkxvenom.itune.data.model.HomeItemKind
@@ -132,6 +144,11 @@ import com.darkxvenom.itune.ui.components.DeveloperNewsPopupDialog
 import com.darkxvenom.itune.data.updates.AppUpdateManager
 import com.darkxvenom.itune.ui.components.AppUpdatePopupDialog
 import com.darkxvenom.itune.ui.theme.AppleOledBlack
+import com.darkxvenom.itune.data.account.MultiAccountManager
+import com.darkxvenom.itune.data.account.UserAccount
+import com.darkxvenom.itune.ui.account.AccountSwitchTransitionOverlay
+import com.darkxvenom.itune.ui.account.HangingProfileIconsPopup
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.requiredSize
@@ -166,6 +183,7 @@ enum class AppScreen {
     BROWSE,
     RADIO,
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 fun HomeScreen(
@@ -173,6 +191,7 @@ fun HomeScreen(
     showTopBarBrand: Boolean = true,
     deferStartupPrompts: Boolean = false,
     onTopBarBrandBoundsChanged: ((iconBounds: Rect, titleBounds: Rect) -> Unit)? = null,
+    onAddNewAccount: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val availableUpdate by AppUpdateManager.availableUpdate.collectAsStateWithLifecycle()
@@ -210,6 +229,11 @@ fun HomeScreen(
         HomeFeedRepository.refreshPersonal(context)
     }
 
+    val spotifyLinked = settingsState.spotifySpdcToken.isNotBlank()
+    val spotifyShelves by SpotifyHomeRepository.shelves.collectAsStateWithLifecycle()
+    LaunchedEffect(spotifyLinked) {
+        if (spotifyLinked) SpotifyHomeRepository.refresh() else SpotifyHomeRepository.clear()
+    }
     val hideExplicit = settingsState.hideExplicitContent
     val allHomePlaylistRefs = remember(personalizedPlaylists, featuredPlaylists, ytAccountState.isSignedIn) {
         if (ytAccountState.isSignedIn && personalizedPlaylists.isNotEmpty()) {
@@ -256,6 +280,9 @@ fun HomeScreen(
             signedIn = ytAccountState.isSignedIn,
         )
     }
+    val visibleSpotify = remember(spotifyShelves, hideExplicit) {
+        spotifyShelves.withoutExplicit(hideExplicit)
+    }
     val listState = rememberLazyListState()
     val overscrollState = rememberSpringOverscrollState()
     val coroutineScope = rememberCoroutineScope()
@@ -299,10 +326,58 @@ fun HomeScreen(
         }
     }
 
+    val onSpotifyItemClick: (HomeFeedItem, List<HomeFeedItem>) -> Unit = { item, queue ->
+        if (SpotifyHomeRepository.isSpotifyItem(item)) {
+            val bid = item.browseId.orEmpty()
+            val nativeType = when {
+                bid.startsWith("spotify:artist:") -> BrowseType.ARTIST
+                bid.startsWith("spotify:album:") -> BrowseType.ALBUM
+                bid.startsWith("spotify:playlist:") || bid.startsWith("spotify:show:") -> BrowseType.PLAYLIST
+                else -> null
+            }
+            if (nativeType != null) {
+                // Same artist / album / playlist screens as YouTube, filled with Spotify data
+                MusicPlayerState.pendingArtistNav = PendingArtistNav(
+                    browseId = bid, name = item.title, subtitle = item.subtitle,
+                    thumbnailUrl = item.thumbnailUrl, initialType = nativeType,
+                )
+            } else {
+                Toast.makeText(context, "Opening ${item.title}…", Toast.LENGTH_SHORT).show()
+                coroutineScope.launch {
+                    when (val action = SpotifyHomeRepository.resolve(item)) {
+                        is SpotifyHomeRepository.Action.Play -> {
+                            SpotifyHomeRepository.markOrigin(action.tracks.map { it.id })
+                            MusicPlayerState.play(action.tracks.first(), action.tracks)
+                        }
+                        else -> Toast.makeText(context, "Couldn't open ${item.title}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        } else {
+            // Songs on Spotify shelves: log to Spotify history, not YouTube
+            SpotifyHomeRepository.markOrigin(queue.mapNotNull { it.videoId })
+            onFeedItemClick(item, queue)
+        }
+    }
+
+    // Play button on the big Spotify cards: start the playlist right away (Preview / card tap opens it).
+    val onSpotifyHeroPlay: (HomeFeedItem) -> Unit = { item ->
+        Toast.makeText(context, "Playing ${item.title}…", Toast.LENGTH_SHORT).show()
+        coroutineScope.launch {
+            when (val action = SpotifyHomeRepository.resolve(item)) {
+                is SpotifyHomeRepository.Action.Play -> {
+                    SpotifyHomeRepository.markOrigin(action.tracks.map { it.id })
+                    MusicPlayerState.play(action.tracks.first(), action.tracks)
+                }
+                else -> Toast.makeText(context, "Couldn't play ${item.title}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     var homeMoreRequest by remember { mutableStateOf<SearchMoreRequest?>(null) }
 
     val onFeedItemMenuClick: (HomeFeedItem, Offset) -> Unit = { item, offset ->
-        val target: SearchMoreTarget? = when (item.kind) {
+        val target: SearchMoreTarget? = if (SpotifyHomeRepository.isSpotifyItem(item)) null else when (item.kind) {
             HomeItemKind.SONG, HomeItemKind.VIDEO, HomeItemKind.EPISODE -> {
                 item.toMusicTrack()?.let { SearchMoreTarget.Song(it) }
             }
@@ -359,6 +434,18 @@ fun HomeScreen(
     var showIRecognition by remember { mutableStateOf(false) }
     var showDeveloperNewsScreen by remember { mutableStateOf(false) }
 
+    val view = LocalView.current
+    val accountsList by MultiAccountManager.accounts.collectAsStateWithLifecycle()
+    var showHangingAccountSwitcher by remember { mutableStateOf(false) }
+    var switchingTargetAccount by remember { mutableStateOf<UserAccount?>(null) }
+    var switchingSourceBounds by remember { mutableStateOf<Rect?>(null) }
+    val handleProfileLongClick: () -> Unit = remember(view) {
+        {
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            showHangingAccountSwitcher = true
+        }
+    }
+
     LaunchedEffect(Unit) {
         DeveloperNewsManager.onOpenNewsRequested = {
             showDeveloperNewsScreen = true
@@ -394,11 +481,14 @@ fun HomeScreen(
     }
 
     LaunchedEffect(deferStartupPrompts) {
-        if (!deferStartupPrompts &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (!deferStartupPrompts) {
+            DeveloperNewsManager.checkOnAppOpen()
+            com.darkxvenom.itune.data.festival.FestivalManager.refresh()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
     }
 
@@ -528,7 +618,8 @@ fun HomeScreen(
                         onBrandBoundsChanged = onTopBarBrandBoundsChanged,
                         onProfileClick = {
                             showSettings = true
-                        }
+                        },
+                        onProfileLongClick = handleProfileLongClick,
                     )
                 }
 
@@ -551,10 +642,12 @@ fun HomeScreen(
                 // Top cards — real data: headline pick, newest release, trending, top artist, podcast
                 item(key = "featured_hero") {
                     val isPortrait = settingsState.topCardType == SettingsStore.TOP_CARD_TYPE_PORTRAIT
+                    val isApple = settingsState.topCardType == SettingsStore.TOP_CARD_TYPE_APPLE
                     LiveFeaturedHeroCarousel(
                         cards = heroCards,
                         isLoading = feedLoading || heroCards.isEmpty() && !feedFailed,
                         isPortrait = isPortrait,
+                        isApple = isApple,
                         sectionTitle = "Top Picks for You",
                         modifier = Modifier.padding(top = 4.dp),
                         onCardClick = { card -> onFeedItemClick(card.item, card.queue) },
@@ -590,6 +683,22 @@ fun HomeScreen(
                         onItemMenuClick = onFeedItemMenuClick,
                     )
                     Spacer(modifier = Modifier.height(28.dp))
+                }
+
+                // Spotify shelves (only after Spotify login); YouTube shelves above stay untouched
+                if (spotifyLinked) {
+                    items(visibleSpotify, key = { it.key }) { shelf ->
+                        if (shelf.key.startsWith("sp_hero_")) {
+                            SpotifyHeroShelf(shelf = shelf, onItemClick = onSpotifyItemClick, onItemPlay = onSpotifyHeroPlay)
+                        } else {
+                            HomeFeedShelfRow(
+                                shelf = shelf,
+                                onItemClick = onSpotifyItemClick,
+                                onItemMenuClick = onFeedItemMenuClick,
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(28.dp))
+                    }
                 }
 
                 // Live Radio Stations (Top 10: Favorites prioritized first, then unliked online stations)
@@ -674,6 +783,7 @@ fun HomeScreen(
                     onProfileClick = {
                         showSettings = true
                     },
+                    onProfileLongClick = handleProfileLongClick,
                     onOpenContentSettings = {
                         showSettings = true
                     },
@@ -738,6 +848,7 @@ fun HomeScreen(
                     onProfileClick = {
                         showSettings = true
                     },
+                    onProfileLongClick = handleProfileLongClick,
                     onRecognizeClick = {
                         showIRecognition = true
                     },
@@ -782,6 +893,7 @@ fun HomeScreen(
                     onProfileClick = {
                         showSettings = true
                     },
+                    onProfileLongClick = handleProfileLongClick,
                     onOpenIRecognition = {
                         showIRecognition = true
                     }
@@ -832,6 +944,15 @@ fun HomeScreen(
                 onAccountClick = { showAvatarDialog = true },
                 onOpenIShare = { showIShare = true },
                 onOpenDynamicIsland = { showDynamicIsland = true },
+                onAddNewAccount = {
+                    showSettings = false
+                    onAddNewAccount()
+                },
+                onSwitchAccount = { target, bounds ->
+                    showSettings = false
+                    switchingSourceBounds = bounds
+                    switchingTargetAccount = target
+                },
             )
         }
 
@@ -1316,16 +1437,47 @@ fun HomeScreen(
             )
         }
 
-        DeveloperNewsPopupDialog(
-            onNavigateToNews = {
-                showDeveloperNewsScreen = true
-            }
-        )
+        if (!deferStartupPrompts && !showDeveloperNewsScreen) {
+            DeveloperNewsPopupDialog(
+                onNavigateToNews = {
+                    showDeveloperNewsScreen = true
+                }
+            )
+        }
 
         availableUpdate?.takeIf { it.tag != dismissedUpdateTag }?.let { release ->
             AppUpdatePopupDialog(
                 release = release,
                 onDismiss = { dismissedUpdateTag = release.tag },
+            )
+        }
+
+        if (showHangingAccountSwitcher) {
+            val activeAcc by MultiAccountManager.activeAccount.collectAsStateWithLifecycle()
+            HangingProfileIconsPopup(
+                accounts = accountsList,
+                activeAccount = activeAcc,
+                onDismiss = { showHangingAccountSwitcher = false },
+                onSelectAccount = { acc, bounds ->
+                    showHangingAccountSwitcher = false
+                    switchingSourceBounds = bounds
+                    switchingTargetAccount = acc
+                },
+                onAddNewAccount = {
+                    showHangingAccountSwitcher = false
+                    onAddNewAccount()
+                },
+            )
+        }
+
+        switchingTargetAccount?.let { targetAcc ->
+            AccountSwitchTransitionOverlay(
+                targetAccount = targetAcc,
+                sourceAvatarBounds = switchingSourceBounds,
+                onComplete = {
+                    switchingTargetAccount = null
+                    switchingSourceBounds = null
+                },
             )
         }
     }

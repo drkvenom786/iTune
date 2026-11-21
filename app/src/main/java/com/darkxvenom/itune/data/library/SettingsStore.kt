@@ -1,9 +1,22 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.data.library
 
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.compose.runtime.Immutable
 import com.darkxvenom.itune.backend.MusicBackend
+import com.darkxvenom.itune.data.auth.EncryptedAuthPrefs
+import com.darkxvenom.itune.data.canvas.SpotifyToken
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +30,12 @@ data class SettingsUiState(
     val spatialAudioMode: String = "Automatic",
     val dolbyAtmos: Boolean = true,
     val losslessAudio: Boolean = true,
+    /** Optional JioSaavn stream provider: tried before YouTube when on. */
+    val jioSaavnProvider: Boolean = false,
+    /** With the JioSaavn provider on: replace cached YouTube songs with JioSaavn quality. */
+    val upgradeCachedSongs: Boolean = false,
+    /** Side of the screen the in-app volume bar appears on: "Right" or "Left". */
+    val volumeBarSide: String = "Right",
     val audioQuality: String = "Extreme",
     val downloadQuality: String = "Best Available",
     val pcmOutputFormat: String = "16-bit PCM",
@@ -27,9 +46,15 @@ data class SettingsUiState(
     val afterglowDuration: String = "Off",
     val soundCheck: Boolean = true,
     val animatedArtwork: Boolean = true,
+    val canvasOverCellular: Boolean = false,
+    val spotifySpdcToken: String = "",
+    val spotifyCanvasAutoHide: Boolean = true,
+    val prioritizeSpotifyCanvas: Boolean = false,
+    val showSyncedLyricsOverCanvas: Boolean = true,
     val timeSyncedLyrics: Boolean = true,
     val playerType: String = "Dynamic",
     val playerDynamicColoring: Boolean = true,
+    val fullScreenCoverArt: Boolean = true,
     val topCardType: String = "Portrait",
     val appFont: String = "system",
     val liquidGlassChrome: Boolean = true,
@@ -99,6 +124,9 @@ object SettingsStore {
     const val KEY_SPATIAL_AUDIO = "spatial_audio_mode"
     const val KEY_DOLBY_ATMOS = "dolby_atmos"
     const val KEY_LOSSLESS_AUDIO = "lossless_audio"
+    const val KEY_JIOSAAVN_PROVIDER = "jiosaavn_provider"
+    const val KEY_UPGRADE_CACHED = "upgrade_cached_songs"
+    const val KEY_VOLUME_BAR_SIDE = "volume_bar_side"
     const val KEY_AUDIO_QUALITY = "audio_quality"
     const val KEY_DOWNLOAD_QUALITY = "download_quality"
     const val KEY_PCM_OUTPUT_FORMAT = "pcm_output_format"
@@ -128,13 +156,20 @@ object SettingsStore {
     const val KEY_AFTERGLOW_DURATION = "afterglow_duration"
     const val KEY_SOUND_CHECK = "sound_check"
     const val KEY_ANIMATED_ARTWORK = "animated_artwork"
+    const val KEY_CANVAS_OVER_CELLULAR = "canvas_over_cellular"
+    const val KEY_SPOTIFY_SPDC_TOKEN = "spotify_spdc_token"
+    const val KEY_SPOTIFY_CANVAS_AUTO_HIDE = "spotify_canvas_auto_hide"
+    const val KEY_PRIORITIZE_SPOTIFY_CANVAS = "prioritize_spotify_canvas"
+    const val KEY_SHOW_SYNCED_LYRICS_OVER_CANVAS = "show_synced_lyrics_over_canvas"
     const val KEY_TIME_SYNCED_LYRICS = "time_synced_lyrics"
     const val KEY_PLAYER_TYPE = "player_type"
     const val KEY_PLAYER_DYNAMIC_COLORING = "player_dynamic_coloring"
+    const val KEY_FULL_SCREEN_COVER_ART = "full_screen_cover_art"
     const val KEY_TOP_CARD_TYPE = "top_card_type"
     const val KEY_APP_FONT = "app_font"
     const val TOP_CARD_TYPE_PORTRAIT = "Portrait"
     const val TOP_CARD_TYPE_LANDSCAPE = "Landscape"
+    const val TOP_CARD_TYPE_APPLE = "Apple"
     const val KEY_LIQUID_GLASS = "liquid_glass_chrome"
     const val KEY_TACTILE_HAPTICS = "tactile_haptics"
     const val KEY_CELLULAR_STREAMING = "cellular_streaming"
@@ -225,13 +260,13 @@ object SettingsStore {
             prefs = p
             // Remove the retired light/system theme preference so old installs stay Dark-only too.
             p.edit().remove("app_theme").apply()
-            _state.value = loadFromPrefs(p)
+            _state.value = loadFromPrefs(context.applicationContext, p)
         }
     }
 
     fun reloadBackupState(context: Context) {
         ensureInit(context)
-        prefs?.let { _state.value = loadFromPrefs(it) }
+        prefs?.let { _state.value = loadFromPrefs(context.applicationContext, it) }
     }
 
     fun isStopMusicOnTaskClearEnabled(context: Context): Boolean {
@@ -279,9 +314,16 @@ object SettingsStore {
             KEY_DOLBY_ATMOS -> cur.copy(dolbyAtmos = value)
             KEY_AUTOMIX -> cur.copy(autoMix = value, automixEnabled = value)
             KEY_LOSSLESS_AUDIO -> cur.copy(losslessAudio = value)
+            KEY_JIOSAAVN_PROVIDER -> cur.copy(jioSaavnProvider = value)
+            KEY_UPGRADE_CACHED -> cur.copy(upgradeCachedSongs = value)
             KEY_SOUND_CHECK -> cur.copy(soundCheck = value)
             KEY_ANIMATED_ARTWORK -> cur.copy(animatedArtwork = value)
+            KEY_CANVAS_OVER_CELLULAR -> cur.copy(canvasOverCellular = value)
+            KEY_SPOTIFY_CANVAS_AUTO_HIDE -> cur.copy(spotifyCanvasAutoHide = value)
+            KEY_PRIORITIZE_SPOTIFY_CANVAS -> cur.copy(prioritizeSpotifyCanvas = value)
+            KEY_SHOW_SYNCED_LYRICS_OVER_CANVAS -> cur.copy(showSyncedLyricsOverCanvas = value)
             KEY_PLAYER_DYNAMIC_COLORING -> cur.copy(playerDynamicColoring = value)
+            KEY_FULL_SCREEN_COVER_ART -> cur.copy(fullScreenCoverArt = value)
             KEY_TIME_SYNCED_LYRICS -> cur.copy(timeSyncedLyrics = value)
             KEY_LIQUID_GLASS -> cur.copy(liquidGlassChrome = value)
             KEY_TACTILE_HAPTICS -> cur.copy(tactileHaptics = value)
@@ -323,6 +365,7 @@ object SettingsStore {
             else -> cur
         }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     fun setString(context: Context, key: String, value: String) {
         ensureInit(context)
@@ -340,10 +383,17 @@ object SettingsStore {
         _state.value = when (key) {
             KEY_DISPLAY_NAME -> cur.copy(displayName = normalized)
             KEY_PLAYER_TYPE -> cur.copy(playerType = if (normalized.equals("Static", ignoreCase = true)) "Static" else "Dynamic")
-            KEY_TOP_CARD_TYPE -> cur.copy(topCardType = if (normalized.equals(TOP_CARD_TYPE_LANDSCAPE, ignoreCase = true)) TOP_CARD_TYPE_LANDSCAPE else TOP_CARD_TYPE_PORTRAIT)
+            KEY_TOP_CARD_TYPE -> cur.copy(
+                topCardType = when {
+                    normalized.equals(TOP_CARD_TYPE_LANDSCAPE, ignoreCase = true) -> TOP_CARD_TYPE_LANDSCAPE
+                    normalized.equals(TOP_CARD_TYPE_APPLE, ignoreCase = true) -> TOP_CARD_TYPE_APPLE
+                    else -> TOP_CARD_TYPE_PORTRAIT
+                },
+            )
             KEY_APP_FONT -> cur.copy(appFont = normalized)
             KEY_SPATIAL_AUDIO -> cur.copy(spatialAudioMode = normalized)
             KEY_AUDIO_QUALITY -> cur.copy(audioQuality = normalizeAudioQuality(normalized))
+            KEY_VOLUME_BAR_SIDE -> cur.copy(volumeBarSide = if (normalized.equals("Left", true)) "Left" else "Right")
             KEY_DOWNLOAD_QUALITY -> cur.copy(downloadQuality = normalized.takeIf { it in setOf("Best Available", "Maximum", "High", "Standard", "Data Saver") } ?: "Best Available")
             KEY_PCM_OUTPUT_FORMAT -> cur.copy(pcmOutputFormat = if (normalized == "32-bit float PCM") normalized else "16-bit PCM")
             KEY_EQ_PRESET -> cur.copy(eqPreset = normalized)
@@ -484,6 +534,24 @@ object SettingsStore {
         _state.value = _state.value.copy(lyricsTranslateMode = mode)
     }
 
+    fun setSpotifySpdcToken(context: Context, token: String) {
+        ensureInit(context)
+        val trimmed = token.trim()
+        EncryptedAuthPrefs.putEncrypted(
+            context,
+            KEY_SPOTIFY_SPDC_TOKEN,
+            trimmed.ifBlank { null },
+        )
+        _state.value = _state.value.copy(spotifySpdcToken = trimmed)
+        SpotifyToken.invalidate()
+        com.darkxvenom.itune.data.canvas.CanvasRepository.clearCache()
+        if (trimmed.isBlank()) {
+            LibraryStore.clearSpotifyAccountDataOnSignOut(context)
+        } else {
+            com.darkxvenom.itune.data.spotify.SpotifyLibrarySyncManager.launchSync(context, force = true)
+        }
+    }
+
     fun setPlayerType(context: Context, type: String) {
         ensureInit(context)
         val valid = if (type.equals("Static", ignoreCase = true)) "Static" else "Dynamic"
@@ -549,7 +617,7 @@ object SettingsStore {
         )
     }
 
-    private fun loadFromPrefs(p: SharedPreferences): SettingsUiState {
+    private fun loadFromPrefs(context: Context, p: SharedPreferences): SettingsUiState {
         val defaults = SettingsUiState()
         val legacyExplicit = p.getString(KEY_EXPLICIT_CONTENT, defaults.explicitContent) ?: defaults.explicitContent
         val hideExplicit = if (p.contains(KEY_HIDE_EXPLICIT)) {
@@ -575,6 +643,9 @@ object SettingsStore {
                 ?: defaults.spatialAudioMode,
             dolbyAtmos = p.getBoolean(KEY_DOLBY_ATMOS, defaults.dolbyAtmos),
             losslessAudio = p.getBoolean(KEY_LOSSLESS_AUDIO, defaults.losslessAudio),
+            jioSaavnProvider = p.getBoolean(KEY_JIOSAAVN_PROVIDER, defaults.jioSaavnProvider),
+            upgradeCachedSongs = p.getBoolean(KEY_UPGRADE_CACHED, defaults.upgradeCachedSongs),
+            volumeBarSide = if (p.getString(KEY_VOLUME_BAR_SIDE, defaults.volumeBarSide).equals("Left", true)) "Left" else "Right",
             audioQuality = normalizeAudioQuality(p.getString(KEY_AUDIO_QUALITY, defaults.audioQuality)),
             downloadQuality = p.getString(KEY_DOWNLOAD_QUALITY, defaults.downloadQuality)?.takeIf { it in setOf("Best Available", "Maximum", "High", "Standard", "Data Saver") } ?: defaults.downloadQuality,
             pcmOutputFormat = p.getString(KEY_PCM_OUTPUT_FORMAT, defaults.pcmOutputFormat) ?: defaults.pcmOutputFormat,
@@ -585,9 +656,15 @@ object SettingsStore {
             automixEnabled = p.getBoolean(KEY_AUTOMIX, defaults.automixEnabled),
             soundCheck = p.getBoolean(KEY_SOUND_CHECK, defaults.soundCheck),
             animatedArtwork = p.getBoolean(KEY_ANIMATED_ARTWORK, defaults.animatedArtwork),
+            canvasOverCellular = p.getBoolean(KEY_CANVAS_OVER_CELLULAR, defaults.canvasOverCellular),
+            spotifySpdcToken = EncryptedAuthPrefs.getDecrypted(context, KEY_SPOTIFY_SPDC_TOKEN).orEmpty(),
+            spotifyCanvasAutoHide = p.getBoolean(KEY_SPOTIFY_CANVAS_AUTO_HIDE, defaults.spotifyCanvasAutoHide),
+            prioritizeSpotifyCanvas = p.getBoolean(KEY_PRIORITIZE_SPOTIFY_CANVAS, defaults.prioritizeSpotifyCanvas),
+            showSyncedLyricsOverCanvas = p.getBoolean(KEY_SHOW_SYNCED_LYRICS_OVER_CANVAS, defaults.showSyncedLyricsOverCanvas),
             timeSyncedLyrics = p.getBoolean(KEY_TIME_SYNCED_LYRICS, defaults.timeSyncedLyrics),
             playerType = p.getString(KEY_PLAYER_TYPE, defaults.playerType) ?: defaults.playerType,
             playerDynamicColoring = p.getBoolean(KEY_PLAYER_DYNAMIC_COLORING, defaults.playerDynamicColoring),
+            fullScreenCoverArt = p.getBoolean(KEY_FULL_SCREEN_COVER_ART, defaults.fullScreenCoverArt),
             topCardType = p.getString(KEY_TOP_CARD_TYPE, defaults.topCardType) ?: defaults.topCardType,
             appFont = p.getString(KEY_APP_FONT, defaults.appFont) ?: defaults.appFont,
             liquidGlassChrome = p.getBoolean(KEY_LIQUID_GLASS, defaults.liquidGlassChrome),

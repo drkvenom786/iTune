@@ -1,9 +1,21 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.settings
 
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -138,13 +150,13 @@ fun DynamicIslandScreen(
     }
 
     val cfg by DynamicIslandStore.state.collectAsStateWithLifecycle()
-    var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var hasOverlayPermission by remember { mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)) }
     var orientationTab by rememberSaveable { mutableIntStateOf(0) } // 0 = Portrait, 1 = Landscape
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                hasOverlayPermission = Settings.canDrawOverlays(context)
+                hasOverlayPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
                 if (hasOverlayPermission && cfg.enabled) {
                     DynamicIslandStore.syncServiceState(context)
                 }
@@ -169,11 +181,20 @@ fun DynamicIslandScreen(
 
     val openOverlaySettings = {
         runCatching {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:${context.packageName}"),
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}"),
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            } else {
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${context.packageName}")
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
             context.startActivity(intent)
         }.onFailure {
@@ -280,7 +301,7 @@ fun DynamicIslandScreen(
                                 subtitle = "Show floating water-bubble player controller",
                                 checked = cfg.enabled && hasOverlayPermission,
                                 onCheckedChange = { wantEnable ->
-                                    if (wantEnable && !Settings.canDrawOverlays(context)) {
+                                    if (wantEnable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
                                         haptics.play(Haptic.Tap)
                                         openOverlaySettings()
                                     } else {
@@ -471,7 +492,7 @@ fun DynamicIslandScreen(
                     // 5. Behavior & Colors
                     item(key = "di_behavior_colors") {
                         val autoCollapseOptions = listOf(4, 6, 10, 0)
-                        val pauseTimeoutOptions = listOf(0, 30, 60, 180)
+                        val pauseTimeoutOptions = listOf(0, 30, 60, 120, 180)
 
                         IslandSectionColumn(title = "BEHAVIOR & CUSTOM COLORS") {
                             IslandToggleRow(
@@ -511,18 +532,24 @@ fun DynamicIslandScreen(
                             IslandInsetDivider()
                             IslandActionRow(
                                 iconRes = R.drawable.ic_di_timer,
-                                title = "Keep Visible When Paused",
-                                subtitle = "Time before paused bubble glides away",
+                                title = "Auto-Hide Dynamic Island After Pause",
+                                subtitle = "Hides the island after playback has been paused",
                                 trailingValue = when (cfg.pauseKeepSec) {
-                                    0 -> "Hide Now"
-                                    60 -> "1 min"
+                                    0 -> "Immediate"
+                                    30 -> "30 sec"
+                                    60 -> "1 min (Default)"
+                                    120 -> "2 min"
                                     180 -> "3 min"
                                     else -> "${cfg.pauseKeepSec} sec"
                                 },
                                 onClick = {
                                     haptics.play(Haptic.Tap)
                                     val idx = pauseTimeoutOptions.indexOf(cfg.pauseKeepSec)
-                                    val next = pauseTimeoutOptions[(idx + 1) % pauseTimeoutOptions.size]
+                                    val next = if (idx in pauseTimeoutOptions.indices) {
+                                        pauseTimeoutOptions[(idx + 1) % pauseTimeoutOptions.size]
+                                    } else {
+                                        60
+                                    }
                                     DynamicIslandStore.update(context) { it.copy(pauseKeepSec = next) }
                                 },
                             )
@@ -615,6 +642,7 @@ fun DynamicIslandScreen(
         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 private fun InteractiveWaterBubblePreview(

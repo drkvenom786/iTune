@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.data.artist
 
 import android.util.Log
@@ -85,7 +96,9 @@ object ArtistRepository {
             ?: error("no watch entry for $videoId")
     }
 
-    suspend fun browseSongs(browseId: String): Result<SongPage> = call("browse:$browseId") {
+    suspend fun browseSongs(rawBrowseId: String): Result<SongPage> = call("browse:$rawBrowseId") {
+        // Innertube needs playlist browse ids as "VL<playlistId>"; a bare "PL…" id answers HTTP 400.
+        val browseId = if (rawBrowseId.startsWith("PL")) "VL$rawBrowseId" else rawBrowseId
         val response = ArtistInnertubeClient.browse(browseId)
         val page = if (browseId.startsWith("MPREb")) {
             albumPageOf(response)
@@ -103,6 +116,7 @@ object ArtistRepository {
     suspend fun allSongs(browseId: String): Result<List<Song>> = call("all:$browseId") {
         songsPaged(browseId).ifEmpty { error("No tracks here") }
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     suspend fun watchQueue(target: WatchTarget): Result<List<Song>> = call("watch:${target.playlistId}") {
         ArtistInnertubeParser.parseWatchQueue(

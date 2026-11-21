@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.audio
 
 import android.Manifest
@@ -18,6 +29,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import androidx.annotation.DrawableRes
+import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Immutable
 import androidx.core.content.ContextCompat
 import com.darkxvenom.itune.R
@@ -32,6 +44,7 @@ enum class AudioDeviceCategory {
     BUILTIN_SPEAKER,
     EXTERNAL_SPEAKER,
     HEARING_AID,
+    CAST_DEVICE,
 }
 
 @Immutable
@@ -43,7 +56,7 @@ data class OutputDeviceEntry(
     @param:DrawableRes val iconRes: Int,
     val sampleRateLabel: String?,
     val batteryPercent: Int?,
-    val info: AudioDeviceInfo,
+    val info: AudioDeviceInfo? = null,
 )
 
 @Immutable
@@ -60,6 +73,7 @@ data class AudioOutputUiState(
     val bitPerfectActive: Boolean = false,
     val usbDevicePresent: Boolean = false,
     val hasBluetoothPermission: Boolean = true,
+    val activeCastDevice: CastDevice? = null,
 )
 
 /**
@@ -107,23 +121,46 @@ object AudioOutputManager {
     private val _state = MutableStateFlow(AudioOutputUiState())
     val state: StateFlow<AudioOutputUiState> = _state.asStateFlow()
 
-    private val deviceCallback = object : AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
-            refreshDevices()
+    private var deviceCallback: Any? = null
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private object Api23Helper {
+        fun createDeviceCallback(): AudioDeviceCallback {
+            return object : AudioDeviceCallback() {
+                override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                    refreshDevices()
+                }
+
+                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                    val currentPref = preferredDevice
+                    if (currentPref != null && removedDevices?.any { it.id == currentPref.id } == true) {
+                        preferredDevice = null
+                        onRouteDeviceChanged?.invoke(null)
+                    }
+                    val currentSec = dualSecondaryDevice
+                    if (currentSec != null && removedDevices?.any { it.id == currentSec.id } == true) {
+                        dualSecondaryDevice = null
+                        simultaneousProcessor?.setTargetDevice(null)
+                    }
+                    refreshDevices()
+                }
+            }
         }
 
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
-            val currentPref = preferredDevice
-            if (currentPref != null && removedDevices?.any { it.id == currentPref.id } == true) {
-                preferredDevice = null
-                onRouteDeviceChanged?.invoke(null)
+        fun register(mgr: AudioManager, callback: Any?, handler: Handler) {
+            (callback as? AudioDeviceCallback)?.let {
+                runCatching { mgr.registerAudioDeviceCallback(it, handler) }
             }
-            val currentSec = dualSecondaryDevice
-            if (currentSec != null && removedDevices?.any { it.id == currentSec.id } == true) {
-                dualSecondaryDevice = null
-                simultaneousProcessor?.setTargetDevice(null)
+        }
+
+        fun unregister(mgr: AudioManager, callback: Any?) {
+            (callback as? AudioDeviceCallback)?.let {
+                runCatching { mgr.unregisterAudioDeviceCallback(it) }
             }
-            refreshDevices()
+        }
+
+        fun getOutputDevices(mgr: AudioManager): List<AudioDeviceInfo> {
+            return mgr.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
         }
     }
 
@@ -159,9 +196,10 @@ object AudioOutputManager {
             usbBitPerfect?.setEnabled(savedBitPerfect)
         }
 
-        if (mgr != null && !callbackRegistered) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mgr != null && !callbackRegistered) {
             callbackRegistered = true
-            runCatching { mgr.registerAudioDeviceCallback(deviceCallback, mainHandler) }
+            val cb = deviceCallback ?: Api23Helper.createDeviceCallback().also { deviceCallback = it }
+            Api23Helper.register(mgr, cb, mainHandler)
         }
 
         refreshDevices()
@@ -171,6 +209,34 @@ object AudioOutputManager {
         val ctx = appContext ?: return
         val mgr = audioManager ?: return
 
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            val fallbackEntry = OutputDeviceEntry(
+                id = 0,
+                name = "Phone Speaker / Headset",
+                subtitle = "System Default Output",
+                category = AudioDeviceCategory.BUILTIN_SPEAKER,
+                iconRes = R.drawable.ic_output_speaker,
+                sampleRateLabel = null,
+                batteryPercent = null,
+                info = null
+            )
+            _state.value = AudioOutputUiState(
+                devices = listOf(fallbackEntry),
+                preferredDeviceId = 0,
+                activeDevice = fallbackEntry,
+                capsuleIconRes = R.drawable.ic_output_speaker,
+                activeSummary = "Phone Speaker",
+                dualAudioEnabled = false,
+                dualSecondaryDeviceId = null,
+                dualSecondaryVolume = 1.0f,
+                bitPerfectEnabled = false,
+                bitPerfectActive = false,
+                usbDevicePresent = false,
+                hasBluetoothPermission = true,
+            )
+            return
+        }
+
         val hasBtPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         } else {
@@ -178,7 +244,7 @@ object AudioOutputManager {
         }
 
         val btBatteries = if (hasBtPerm) queryBondedBatteryMap(ctx) else emptyMap()
-        val rawDevices = mgr.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val rawDevices = Api23Helper.getOutputDevices(mgr)
             .filter { isSupportedOutputDevice(it) }
             .distinctBy { "${it.type}_${it.productName}_${it.addressCompat()}" }
             .sortedBy { sortPriority(it) }
@@ -197,25 +263,51 @@ object AudioOutputManager {
 
         // Sync USB DAC bit-perfect target
         val usbDeviceInfo = entries.firstOrNull {
-            it.info.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.info.type == AudioDeviceInfo.TYPE_USB_HEADSET
+            it.info?.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.info?.type == AudioDeviceInfo.TYPE_USB_HEADSET
         }?.info
         usbBitPerfect?.setDevice(usbDeviceInfo)
 
+        // Cast & Wireless Active Device policy
+        val activeCast = CastDiscoveryManager.activeCastDevice.value
+        val effectiveActiveEntry = if (activeCast != null && chosenPref == null) {
+            OutputDeviceEntry(
+                id = -9999,
+                name = activeCast.name,
+                subtitle = "Google Cast • ${activeCast.model}",
+                category = AudioDeviceCategory.CAST_DEVICE,
+                iconRes = R.drawable.ic_cast,
+                sampleRateLabel = "Wi-Fi Hi-Res",
+                batteryPercent = null,
+                info = null
+            )
+        } else {
+            activeEntry
+        }
+
         // Capsule icon policy:
+        // - Cast device connected -> ic_cast
         // - Bluetooth audio connected/selected -> ic_airbuds
         // - USB / wired audio jack -> ic_headphone
         // - Speaker (explicit OR System Default routing to phone speaker) -> ic_output_speaker
         // - External/HDMI -> ic_output_external_speaker, Hearing aid -> ic_output_hearing_aid
         // - No device resolved yet -> ic_airbuds (ready state)
-        val capsuleIcon = resolveCapsuleIcon(
-            chosenPref = chosenPref,
-            activeEntry = activeEntry,
-        )
+        val capsuleIcon = if (activeCast != null && chosenPref == null) {
+            R.drawable.ic_cast
+        } else {
+            resolveCapsuleIcon(
+                chosenPref = chosenPref,
+                activeEntry = activeEntry,
+            )
+        }
 
-        val summary = buildString {
-            append(activeEntry?.name ?: "Phone Speaker")
-            activeEntry?.batteryPercent?.let { append(" • $it%") }
-            activeEntry?.sampleRateLabel?.let { append(" • $it") }
+        val summary = if (activeCast != null && chosenPref == null) {
+            "${activeCast.name} • Google Cast"
+        } else {
+            buildString {
+                append(effectiveActiveEntry?.name ?: "Phone Speaker")
+                effectiveActiveEntry?.batteryPercent?.let { append(" • $it%") }
+                effectiveActiveEntry?.sampleRateLabel?.let { append(" • $it") }
+            }
         }
 
         val bitPerfectSaved = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -224,7 +316,7 @@ object AudioOutputManager {
         _state.value = AudioOutputUiState(
             devices = entries,
             preferredDeviceId = chosenPref?.id,
-            activeDevice = activeEntry,
+            activeDevice = effectiveActiveEntry,
             capsuleIconRes = capsuleIcon,
             activeSummary = summary,
             dualAudioEnabled = simultaneousProcessor?.enabled == true,
@@ -234,10 +326,38 @@ object AudioOutputManager {
             bitPerfectActive = usbBitPerfect?.isConfigured() == true,
             usbDevicePresent = usbDeviceInfo != null,
             hasBluetoothPermission = hasBtPerm,
+            activeCastDevice = activeCast,
         )
     }
 
+    fun selectCastDevice(device: CastDevice?) {
+        CastDiscoveryManager.selectCastDevice(device)
+        if (device != null) {
+            preferredDevice = null
+            onRouteDeviceChanged?.invoke(null)
+            val castEntry = OutputDeviceEntry(
+                id = -9999,
+                name = device.name,
+                subtitle = "Google Cast • ${device.model}",
+                category = AudioDeviceCategory.CAST_DEVICE,
+                iconRes = R.drawable.ic_cast,
+                sampleRateLabel = "Wi-Fi Hi-Res",
+                batteryPercent = null,
+                info = null
+            )
+            _state.value = _state.value.copy(
+                activeDevice = castEntry,
+                capsuleIconRes = R.drawable.ic_cast,
+                activeSummary = "${device.name} • Google Cast",
+                activeCastDevice = device,
+            )
+        } else {
+            refreshDevices()
+        }
+    }
+
     fun selectPreferredDevice(entry: OutputDeviceEntry?) {
+        CastDiscoveryManager.selectCastDevice(null)
         preferredDevice = entry?.info
         onRouteDeviceChanged?.invoke(entry?.info)
         refreshDevices()
@@ -298,9 +418,11 @@ object AudioOutputManager {
 
     fun release() {
         val mgr = audioManager
-        if (mgr != null && callbackRegistered) {
-            runCatching { mgr.unregisterAudioDeviceCallback(deviceCallback) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && mgr != null && callbackRegistered) {
+            val cb = deviceCallback
+            if (cb != null) Api23Helper.unregister(mgr, cb)
         }
+        deviceCallback = null
         callbackRegistered = false
         usbBitPerfect?.clear()
         usbBitPerfect = null
@@ -517,6 +639,7 @@ object AudioOutputManager {
         return result
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 private fun AudioDeviceInfo.addressCompat(): String =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) address.orEmpty() else ""
@@ -533,6 +656,7 @@ internal fun resolveOutputCapsuleIcon(
         AudioDeviceCategory.HEARING_AID -> R.drawable.ic_output_hearing_aid
         AudioDeviceCategory.EXTERNAL_SPEAKER -> R.drawable.ic_output_external_speaker
         AudioDeviceCategory.BUILTIN_SPEAKER -> R.drawable.ic_output_speaker
+        AudioDeviceCategory.CAST_DEVICE -> R.drawable.ic_cast
     }
 }
 
@@ -543,6 +667,7 @@ internal fun resolveOutputListIcon(category: AudioDeviceCategory): Int = when (c
     AudioDeviceCategory.BUILTIN_SPEAKER -> R.drawable.ic_output_speaker
     AudioDeviceCategory.EXTERNAL_SPEAKER -> R.drawable.ic_output_external_speaker
     AudioDeviceCategory.HEARING_AID -> R.drawable.ic_output_hearing_aid
+    AudioDeviceCategory.CAST_DEVICE -> R.drawable.ic_cast
 }
 
 fun AudioDeviceInfo.isBluetoothOutput(): Boolean {

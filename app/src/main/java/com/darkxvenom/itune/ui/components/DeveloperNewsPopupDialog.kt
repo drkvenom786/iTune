@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.components
 
 import android.os.Build
@@ -88,10 +99,11 @@ fun DeveloperNewsPopupDialog(
         ),
         label = "newsPulseScale"
     )
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     Dialog(
         onDismissRequest = {
-            DeveloperNewsManager.dismissPopup(item.id)
+            DeveloperNewsManager.dismissPopup(item.id, item.timestamp)
         },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
@@ -115,7 +127,7 @@ fun DeveloperNewsPopupDialog(
                 .clickable(
                     indication = null,
                     interactionSource = remember { MutableInteractionSource() }
-                ) { DeveloperNewsManager.dismissPopup(item.id) },
+                ) { DeveloperNewsManager.dismissPopup(item.id, item.timestamp) },
             contentAlignment = Alignment.Center
         ) {
             // Centered Pure Black Apple-styled Modal Dialog Card
@@ -320,6 +332,7 @@ fun DeveloperNewsPopupDialog(
                                 try {
                                     uriHandler.openUri(item.actionUrl)
                                 } catch (_: Exception) {}
+                                DeveloperNewsManager.dismissPopup(item.id, item.timestamp)
                             },
                         contentAlignment = Alignment.Center
                     ) {
@@ -357,7 +370,7 @@ fun DeveloperNewsPopupDialog(
                         .fillMaxWidth()
                         .height(48.dp)
                         .clickable {
-                            DeveloperNewsManager.dismissPopup(item.id)
+                            DeveloperNewsManager.dismissPopup(item.id, item.timestamp)
                             onNavigateToNews()
                         },
                     contentAlignment = Alignment.Center
@@ -383,7 +396,7 @@ fun DeveloperNewsPopupDialog(
                         .fillMaxWidth()
                         .height(48.dp)
                         .clickable {
-                            DeveloperNewsManager.dismissPopup(item.id)
+                            DeveloperNewsManager.dismissPopup(item.id, item.timestamp)
                         },
                     contentAlignment = Alignment.Center
                 ) {

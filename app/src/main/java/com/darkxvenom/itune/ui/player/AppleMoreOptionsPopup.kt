@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.ui.player
 
 import com.darkxvenom.itune.ui.aod.AlwaysOnDisplayManager
@@ -20,6 +31,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -43,6 +55,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -55,6 +68,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.MusicNote
@@ -116,9 +130,14 @@ import com.darkxvenom.itune.backend.MusicBackend
 import com.darkxvenom.itune.backend.MusicArtist
 import com.darkxvenom.itune.backend.MusicPlayerState
 import com.darkxvenom.itune.backend.MusicTrack
+import com.darkxvenom.itune.backend.highQualityThumbnail
+import com.darkxvenom.itune.data.library.SavedSongMetadata
 import com.darkxvenom.itune.data.model.BrowseType
 import com.darkxvenom.itune.data.model.PendingArtistNav
 import com.darkxvenom.itune.backend.formatMusicDuration
+import com.darkxvenom.itune.ui.library.AppleSheetAddToPlaylistContent
+import com.darkxvenom.itune.ui.library.AppleSheetCreatePlaylistContent
+import com.darkxvenom.itune.ui.library.PendingPlaylistPayload
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -128,6 +147,8 @@ import kotlin.math.sin
 private enum class MorePopupPage {
     MAIN,
     DOWNLOAD,
+    ADD_TO_PLAYLIST,
+    CREATE_PLAYLIST,
     LYRICS_MENU,
     LYRICS_SEARCH,
     LYRICS_EDIT,
@@ -641,13 +662,16 @@ fun AppleMoreOptionsPopup(
                 MorePopupPage.LYRICS_SEARCH,
                 MorePopupPage.LYRICS_EDIT,
                 MorePopupPage.LYRICS_OFFSET -> activePage = MorePopupPage.LYRICS_MENU
+                MorePopupPage.CREATE_PLAYLIST -> activePage = MorePopupPage.ADD_TO_PLAYLIST
                 MorePopupPage.MAIN -> onDismiss()
                 else -> activePage = MorePopupPage.MAIN
             }
         },
         isTopAnchored = isPanelOpen,
         bottomClearanceDp = bottomClearanceDp,
-        hasInputFocusPage = activePage == MorePopupPage.LYRICS_SEARCH || activePage == MorePopupPage.LYRICS_EDIT,
+        hasInputFocusPage = activePage == MorePopupPage.LYRICS_SEARCH ||
+            activePage == MorePopupPage.LYRICS_EDIT ||
+            activePage == MorePopupPage.CREATE_PLAYLIST,
         modifier = modifier,
         headerActions = {
             val isFavorite = MusicPlayerState.isFavorite(track.id)
@@ -695,6 +719,7 @@ fun AppleMoreOptionsPopup(
                             targetState = activePage,
                             transitionSpec = {
                                 val navigatingBack = targetState == MorePopupPage.MAIN ||
+                                    (targetState == MorePopupPage.ADD_TO_PLAYLIST && initialState == MorePopupPage.CREATE_PLAYLIST) ||
                                     (targetState == MorePopupPage.LYRICS_MENU &&
                                         (initialState == MorePopupPage.LYRICS_SEARCH ||
                                             initialState == MorePopupPage.LYRICS_EDIT ||
@@ -718,6 +743,24 @@ fun AppleMoreOptionsPopup(
                                             onClick = {
                                                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                                 activePage = MorePopupPage.DOWNLOAD
+                                            }
+                                        )
+                                        PopupMenuDivider()
+
+                                        UpgradeQualityRow(
+                                            onClick = {
+                                                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                                MusicPlayerState.upgradeCurrentQuality()
+                                            }
+                                        )
+                                        PopupMenuDivider()
+
+                                        MorePopupVectorOptionRow(
+                                            icon = Icons.AutoMirrored.Rounded.QueueMusic,
+                                            title = "Add to Playlist",
+                                            onClick = {
+                                                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                                activePage = MorePopupPage.ADD_TO_PLAYLIST
                                             }
                                         )
                                         PopupMenuDivider()
@@ -944,10 +987,56 @@ fun AppleMoreOptionsPopup(
                                         onSelectDone = { onDismiss() }
                                     )
                                 }
+
+                                MorePopupPage.ADD_TO_PLAYLIST -> {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        PopupSubPageHeader(
+                                            title = "Add to Playlist",
+                                            onBack = { activePage = MorePopupPage.MAIN }
+                                        )
+                                        PopupMenuDivider()
+                                        val playlistPayload = remember(track) {
+                                            PendingPlaylistPayload(
+                                                title = track.title,
+                                                subtitle = track.artists,
+                                                artworkUrl = track.thumbnailUrl?.highQualityThumbnail() ?: track.thumbnailUrl,
+                                                staticSongs = listOf(SavedSongMetadata.fromTrack(track)),
+                                            )
+                                        }
+                                        AppleSheetAddToPlaylistContent(
+                                            payload = playlistPayload,
+                                            onCreateNewClick = { activePage = MorePopupPage.CREATE_PLAYLIST },
+                                            onCompleted = { onDismiss() },
+                                        )
+                                    }
+                                }
+
+                                MorePopupPage.CREATE_PLAYLIST -> {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        PopupSubPageHeader(
+                                            title = "New Playlist",
+                                            onBack = { activePage = MorePopupPage.ADD_TO_PLAYLIST }
+                                        )
+                                        PopupMenuDivider()
+                                        val playlistPayload = remember(track) {
+                                            PendingPlaylistPayload(
+                                                title = track.title,
+                                                subtitle = track.artists,
+                                                artworkUrl = track.thumbnailUrl?.highQualityThumbnail() ?: track.thumbnailUrl,
+                                                staticSongs = listOf(SavedSongMetadata.fromTrack(track)),
+                                            )
+                                        }
+                                        AppleSheetCreatePlaylistContent(
+                                            payload = playlistPayload,
+                                            onCompleted = { onDismiss() },
+                                        )
+                                    }
+                                }
                             }
                         }
     }
 }
+// Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
 @Composable
 internal fun HeaderCircleActionButton(
@@ -1013,6 +1102,56 @@ private fun MorePopupRowFrame(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "Upgrade Quality": lossless glyph + title. While the search / swap runs the play state is untouched
+ * and a red bar sweeps along the bottom of the row (no spinner, no loading takeover).
+ */
+@Composable
+private fun UpgradeQualityRow(onClick: () -> Unit) {
+    val busy = MusicPlayerState.upgradingQuality
+    Box(modifier = Modifier.fillMaxWidth()) {
+        MorePopupRowFrame(title = "Upgrade Quality", onClick = onClick) {
+            Image(
+                painter = painterResource(id = R.drawable.ic_lossless),
+                contentDescription = "Upgrade Quality",
+                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.92f)),
+                modifier = Modifier.size(width = 21.dp, height = 16.dp)
+            )
+        }
+        if (busy) {
+            val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "upgradeBar")
+            val x by t.animateFloat(
+                initialValue = -0.4f,
+                targetValue = 1f,
+                animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                    androidx.compose.animation.core.tween(1100, easing = androidx.compose.animation.core.LinearEasing),
+                ),
+                label = "upgradeBarX",
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clipToBounds()
+                    .background(Color.White.copy(alpha = 0.08f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.4f)
+                        .fillMaxHeight()
+                        .graphicsLayer { translationX = x * size.width / 0.4f }
+                        .background(
+                            androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                listOf(Color.Transparent, Color(0xFFFF1744), Color(0xFFFF5252), Color.Transparent)
+                            )
+                        )
                 )
             }
         }

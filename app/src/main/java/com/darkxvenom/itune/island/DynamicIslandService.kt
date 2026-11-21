@@ -1,3 +1,14 @@
+/*
+ * Copyright (C) 2026 DxV Studio ~~ Dark
+ *
+ * Originally created by DxV Studio ~~ Dark.
+ * Credits: DxV Studio, AirBeats, and Dark.
+ *
+ * This file is part of iTune and is licensed under the GNU General Public License v3.0 (GPL-3.0).
+ * Any copying, modification, or redistribution of this code must strictly comply with the
+ * terms of the project LICENSE file and retain full author credit.
+ */
+
 package com.darkxvenom.itune.island
 
 import android.animation.Animator
@@ -72,6 +83,7 @@ import kotlin.math.sin
 private data class IslandMediaSnapshot(
     val track: MusicTrack?,
     val isPlaying: Boolean,
+    val playbackState: Int,
     val positionMs: Long,
     val durationMs: Long,
     val shuffleEnabled: Boolean,
@@ -91,6 +103,7 @@ class DynamicIslandService : Service() {
 
     private var isAdded = false
     private var isAppInForeground = DynamicIslandForegroundTracker.isForeground
+    private var isDismissedDueToPause = false
     private var config = DynamicIslandConfig()
     private var lastLoadedArtUrl: String? = null
     private var pauseDismissJob: Job? = null
@@ -158,6 +171,7 @@ class DynamicIslandService : Service() {
                 IslandMediaSnapshot(
                     track = t,
                     isPlaying = MusicPlayerState.isPlaying,
+                    playbackState = MusicPlayerState.playbackState,
                     positionMs = MusicPlayerState.positionMs,
                     durationMs = MusicPlayerState.durationMs,
                     shuffleEnabled = MusicPlayerState.shuffleEnabled,
@@ -193,13 +207,27 @@ class DynamicIslandService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundCompat()
         config = DynamicIslandStore.state.value
-        if (!config.enabled || !Settings.canDrawOverlays(this)) {
+        if (!config.enabled || !canDrawOverlaysCompat(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
         applyConfigToView()
         syncVisibilityAndContent()
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val isMusicPlaying = MusicPlayerState.isPlaying
+        val stopOnTaskClear = com.darkxvenom.itune.data.library.SettingsStore.isStopMusicOnTaskClearEnabled(applicationContext)
+        if (!isMusicPlaying || stopOnTaskClear) {
+            isDismissedDueToPause = true
+            pauseDismissJob?.cancel()
+            autoCollapseJob?.cancel()
+            hideIslandImmediate()
+            runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -210,6 +238,7 @@ class DynamicIslandService : Service() {
 
     override fun onDestroy() {
         DynamicIslandForegroundTracker.removeListener(foregroundListener)
+        isDismissedDueToPause = true
         pauseDismissJob?.cancel()
         autoCollapseJob?.cancel()
         hideIslandImmediate()
@@ -303,7 +332,7 @@ class DynamicIslandService : Service() {
     }
 
     private fun syncVisibilityAndContent() {
-        if (!config.enabled || !Settings.canDrawOverlays(this)) {
+        if (!config.enabled || !canDrawOverlaysCompat(this)) {
             hideIslandImmediate()
             return
         }
@@ -317,20 +346,34 @@ class DynamicIslandService : Service() {
         }
 
         val track = MusicPlayerState.currentTrack
-        if (track == null) {
+        val hasSong = track != null && MusicPlayerState.playbackState != Player.STATE_IDLE
+        if (!hasSong) {
+            isDismissedDueToPause = false
             pauseDismissJob?.cancel()
+            pauseDismissJob = null
+            cancelAutoCollapse()
             hideIslandImmediate()
             return
         }
 
         if (MusicPlayerState.isPlaying) {
+            isDismissedDueToPause = false
             pauseDismissJob?.cancel()
             pauseDismissJob = null
             showIsland()
         } else {
+            // Once auto-hidden due to pause timeout, keep hidden until user resumes playback
+            if (isDismissedDueToPause) {
+                hideIslandImmediate()
+                return
+            }
+
             val keepSec = config.pauseKeepSec
             if (keepSec <= 0) {
+                isDismissedDueToPause = true
                 pauseDismissJob?.cancel()
+                pauseDismissJob = null
+                cancelAutoCollapse()
                 hideIslandImmediate()
             } else {
                 showIsland()
@@ -338,6 +381,7 @@ class DynamicIslandService : Service() {
                     pauseDismissJob = scope.launch {
                         delay(keepSec * 1000L)
                         if (!MusicPlayerState.isPlaying) {
+                            isDismissedDueToPause = true
                             hideIslandImmediate()
                         }
                     }
@@ -728,6 +772,7 @@ private class DynamicIslandOverlayView(
         updateAccentShaders()
         invalidate()
     }
+    // Originally created by DxV Studio ~~ Dark | Credits: DxV Studio, AirBeats, Dark — Licensed under GPL-3.0.
 
     private fun updateAccentShaders() {
         val activeAccent = if (cfg.adaptiveAlbumTint) dynamicAccentColor else cfg.accentColor
